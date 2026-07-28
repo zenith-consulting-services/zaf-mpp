@@ -1,0 +1,7 @@
+zaf-mpp is a Rust port of the read path of MPXJ (https://github.com/joniles/mpxj),
+written and copyright by Jon Iles and the MPXJ contributors, originally
+published by Packwood Software. All knowledge of the MPP14 binary format
+encoded in this crate, including block layouts, field maps, and format
+quirks, comes from the MPXJ source. This crate is licensed under the GNU
+Lesser General Public License, version 2.1 or later, the same terms as
+MPXJ itself.

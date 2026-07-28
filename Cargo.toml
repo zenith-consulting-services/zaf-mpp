@@ -1,0 +1,21 @@
+[package]
+name = "zaf_mpp"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust, read-only parser for Microsoft Project MPP14 files (Project 2010-365). A port of the MPXJ read path."
+license = "LGPL-2.1-or-later"
+repository = "https://github.com/zenith-consulting-services/zaf-mpp"
+readme = "README.md"
+
+[lib]
+name = "zaf_mpp"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+cfb = "0.14"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+panic = "unwind"

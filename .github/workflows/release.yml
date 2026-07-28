@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Reads the pinned compiler version from rust-toolchain.toml, so
+      # release builds always use the same rustc referenced in the
+      # release notes / attribution file below.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+
+      - name: Check tag matches Cargo.toml version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          crate_version="$(cargo metadata --no-deps --format-version 1 --locked 2>/dev/null | jq -r '.packages[0].version')"
+          if [ "$tag_version" != "$crate_version" ]; then
+            echo "::error::Tag v$tag_version does not match Cargo.toml version $crate_version"
+            exit 1
+          fi
+
+      - name: Fetch integration test fixtures
+        run: ./scripts/fetch-test-data.sh
+
+      - name: Test
+        run: cargo test --all-targets --locked
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      # Cargo.lock pins the exact version of every dependency, and
+      # `cargo metadata` resolves each one's declared license straight
+      # from its own Cargo.toml. This ties the LGPL-2.1-or-later notice
+      # in NOTICE to the exact upstream crate versions shipped in this
+      # release, not just version ranges.
+      - name: Generate third-party license manifest
+        run: |
+          rustc_version="$(rustc --version)"
+          mpxj_commit="$(grep -oE '^MPXJ_COMMIT="[0-9a-f]+"' scripts/fetch-test-data.sh | cut -d'"' -f2)"
+
+          {
+            echo "# Third-party attribution for ${GITHUB_REF_NAME}"
+            echo
+            echo "Built with: $rustc_version"
+            echo
+            echo "Test fixtures ported from joniles/mpxj @ $mpxj_commit"
+            echo
+            echo "## Dependency licenses (from Cargo.lock, pinned exact versions)"
+            echo
+            cargo metadata --format-version 1 --locked 2>/dev/null \
+              | jq -r '.packages[] | select(.source != null) | "- \(.name) \(.version): \(.license // "unknown")"' \
+              | sort -u
+          } > THIRD-PARTY-LICENSES.md
+
+      - name: Create release
+        uses: softprops/action-gh-release@fe965f7af51af5f2602596916f38a38df2e33de0 # v3.0.2
+        with:
+          files: |
+            THIRD-PARTY-LICENSES.md
+            target/release/libzaf_mpp.so
+            target/release/libzaf_mpp.rlib
+          generate_release_notes: true

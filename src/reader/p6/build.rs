@@ -367,15 +367,14 @@ pub(crate) fn build_project(data: P6Data) -> MppResult<Project> {
 
     // Summary durations: MS Project stores a scheduler-computed duration
     // on every summary row; P6 stores none, so measure working time
-    // between the rolled-up start and finish on the default calendar
-    // (whole-day resolution — start/finish times within the day are
-    // ignored, which matches how phase-level durations read in practice).
+    // between the rolled-up start and finish on the default calendar,
+    // clipping the first and last day to the actual start/finish times so
+    // partial days count fractionally, as MS Project's scheduler does.
     if let Some(cal) = default_calendar {
         for task in tasks.iter_mut().filter(|t| t.summary) {
             if task.duration.is_none() {
                 if let (Some(start), Some(finish)) = (task.start, task.finish) {
-                    task.duration =
-                        Some(hours(working_hours_between(cal, start.date, finish.date)));
+                    task.duration = Some(hours(working_hours_between(cal, start, finish)));
                 }
             }
         }
@@ -763,21 +762,33 @@ fn weekday_index(date: crate::util::MppDate) -> usize {
     ((days_from_civil(date) + 4).rem_euclid(7)) as usize
 }
 
-/// Working hours between two dates (inclusive) on a P6 calendar: sum of
-/// each day's working ranges, with single-day exceptions overriding the
-/// weekday pattern.
+/// Working hours between two timestamps on a P6 calendar: sum of each
+/// day's working ranges, with single-day exceptions overriding the
+/// weekday pattern, and the first/last day clipped to the start/finish
+/// times so partial days count fractionally.
 fn working_hours_between(
     cal: &P6Calendar,
-    from: crate::util::MppDate,
-    to: crate::util::MppDate,
+    from_dt: crate::util::MppDateTime,
+    to_dt: crate::util::MppDateTime,
 ) -> f64 {
-    if to < from {
+    let (from, to) = (from_dt.date, to_dt.date);
+    if to < from || (to == from && to_dt.seconds_since_midnight < from_dt.seconds_since_midnight) {
         return 0.0;
     }
     let range_hours = |ranges: &[(u32, u32)]| -> f64 {
         ranges
             .iter()
             .map(|&(s, e)| (e.saturating_sub(s)) as f64 / 3600.0)
+            .sum()
+    };
+    let clipped_hours = |ranges: &[(u32, u32)], lo: u32, hi: u32| -> f64 {
+        ranges
+            .iter()
+            .map(|&(s, e)| {
+                let s = s.max(lo);
+                let e = e.min(hi);
+                e.saturating_sub(s) as f64 / 3600.0
+            })
             .sum()
     };
     // A calendar with no day data at all reads as a standard Mon-Fri
@@ -797,19 +808,31 @@ fn working_hours_between(
             &cal.days[weekday].ranges
         }
     };
-    let exceptions: HashMap<crate::util::MppDate, f64> = cal
-        .exceptions
-        .iter()
-        .map(|e| (e.date, range_hours(&e.ranges)))
-        .collect();
+    let exception_ranges: HashMap<crate::util::MppDate, &Vec<(u32, u32)>> =
+        cal.exceptions.iter().map(|e| (e.date, &e.ranges)).collect();
 
     let mut total = 0.0;
     let mut day = from;
     loop {
-        total += exceptions
+        let ranges: &[(u32, u32)] = exception_ranges
             .get(&day)
-            .copied()
-            .unwrap_or_else(|| range_hours(day_ranges(weekday_index(day))));
+            .map(|r| r.as_slice())
+            .unwrap_or_else(|| day_ranges(weekday_index(day)));
+        let lo = if day == from {
+            from_dt.seconds_since_midnight
+        } else {
+            0
+        };
+        let hi = if day == to {
+            to_dt.seconds_since_midnight
+        } else {
+            24 * 3600
+        };
+        total += if lo == 0 && hi == 24 * 3600 {
+            range_hours(ranges)
+        } else {
+            clipped_hours(ranges, lo, hi)
+        };
         if day >= to {
             break;
         }
@@ -1032,10 +1055,24 @@ mod tests {
             cal.days[i].present = true;
             cal.days[i].ranges = vec![(8 * 3600, 16 * 3600)];
         }
-        // Mon 2026-03-02 through Sun 2026-03-08: five 8h days.
-        let from = crate::util::MppDate::new(2026, 3, 2);
-        let to = crate::util::MppDate::new(2026, 3, 8);
-        assert!((working_hours_between(&cal, from, to) - 40.0).abs() < 1e-9);
+        let dt = |y, m, d, secs| crate::util::MppDateTime {
+            date: crate::util::MppDate::new(y, m, d),
+            seconds_since_midnight: secs,
+        };
+        // Mon 2026-03-02 00:00 through Sun 2026-03-08 24:00: five 8h days.
+        assert!(
+            (working_hours_between(&cal, dt(2026, 3, 2, 0), dt(2026, 3, 8, 24 * 3600)) - 40.0)
+                .abs()
+                < 1e-9
+        );
+        // Starting mid-Monday (12:00) trims 4 working hours off the front;
+        // finishing Friday 12:00 trims 4 off the back.
+        assert!(
+            (working_hours_between(&cal, dt(2026, 3, 2, 12 * 3600), dt(2026, 3, 6, 12 * 3600))
+                - 32.0)
+                .abs()
+                < 1e-9
+        );
     }
 }
 

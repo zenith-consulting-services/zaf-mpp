@@ -605,8 +605,12 @@ fn sum_options(values: &[Option<f64>]) -> Option<f64> {
 
 /// Populate summary (WBS) rows from their descendants: dates min/max,
 /// duration/work/cost sums of leaf values, percent complete weighted by
-/// planned duration. Bottom-up: children always appear after their parent
-/// in outline order, so a reverse pass accumulates correctly.
+/// planned duration. Summaries keep `critical: false`: P6 has no WBS-level
+/// criticality (MS Project's scheduler computes summary slack from summary
+/// dates, which P6 data cannot reproduce), and inferring it from children
+/// over-marks bands that merely contain critical work. Bottom-up: children
+/// always appear after their parent in outline order, so a reverse pass
+/// accumulates correctly.
 fn rollup_summaries(tasks: &mut [Task]) {
     #[derive(Default, Clone)]
     struct Acc {
@@ -628,6 +632,12 @@ fn rollup_summaries(tasks: &mut [Task]) {
     for idx in (0..tasks.len()).rev() {
         let (uid, parent) = (tasks[idx].unique_id, tasks[idx].parent_task_unique_id);
 
+        // A summary's own weight towards ITS parent is the accumulated
+        // weight of its subtree (summaries carry no duration of their
+        // own), so a multi-level hierarchy propagates percent complete all
+        // the way to the root.
+        let mut subtree_weight = 0.0;
+
         if tasks[idx].summary {
             if let Some(acc) = accs.remove(&uid) {
                 let t = &mut tasks[idx];
@@ -645,6 +655,7 @@ fn rollup_summaries(tasks: &mut [Task]) {
                 }
                 if acc.weight > 0.0 {
                     t.percent_complete = acc.weighted_pct / acc.weight;
+                    subtree_weight = acc.weight;
                 }
             }
         }
@@ -667,12 +678,15 @@ fn rollup_summaries(tasks: &mut [Task]) {
             up.baseline_cost += c;
             up.has_baseline_cost = true;
         }
-        let weight = t
-            .baseline
-            .duration
-            .or(t.duration)
-            .map(|d| d.value)
-            .unwrap_or(0.0);
+        let weight = if t.summary {
+            subtree_weight
+        } else {
+            t.baseline
+                .duration
+                .or(t.duration)
+                .map(|d| d.value)
+                .unwrap_or(0.0)
+        };
         if weight > 0.0 {
             up.weighted_pct += t.percent_complete * weight;
             up.weight += weight;

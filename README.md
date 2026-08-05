@@ -1,40 +1,57 @@
 # zaf-mpp
 
-A pure-Rust, read-only parser for Microsoft Project MPP14 files (Project
-2010 through 365). It is a deliberate port of the read path of
+A pure-Rust, read-only parser for project schedule files: Microsoft
+Project MPP14 (Project 2010 through 365) and Primavera P6 exports in both
+XER and PMXML form. It is a deliberate port of the read path of
 [MPXJ](https://github.com/joniles/mpxj), Jon Iles's Java library for
 reading and writing project file formats.
 
 ## Scope
 
-MPP14 only: Project 2010, 2013, 2016, 2019, and 365 all save to this
-format. Opening an MPP8, MPP9, or MPP12 file (Project 98 through 2007)
-returns `MppError::UnsupportedVersion` naming the format detected.
+Formats:
+
+- **MPP14** — Project 2010, 2013, 2016, 2019, and 365 all save to this
+  format. Opening an MPP8, MPP9, or MPP12 file (Project 98 through 2007)
+  returns `MppError::UnsupportedVersion` naming the format detected.
+- **Primavera P6 XER** — the tab-delimited export produced by every P6
+  version.
+- **Primavera P6 PMXML** — the `APIBusinessObjects` XML export.
+
+Every format parses into the same `Project` model, so consumers are
+format-agnostic. A P6 export containing several projects yields the
+exported one (cross-project relations are dropped).
 
 In scope: project properties, task hierarchy and scheduling fields
 (dates, duration, work, percent complete, milestones, constraints, manual
 vs auto scheduling, critical path and slack), task dependencies with lag,
-resources, resource assignments, baselines 0 through 10, and calendar
-working time including exceptions.
+resources, resource assignments, baselines 0 through 10 (for P6, baseline
+0 is populated from the planned/"target" values, matching MPXJ's
+planned-attributes baseline strategy), and calendar working time
+including exceptions.
 
 Out of scope: all write support, enterprise and custom fields, views and
-other presentation data, and VBA.
+other presentation data, VBA, and P6 concepts with no MPP counterpart in
+the model (activity codes, UDFs, expense items, activity steps, roles,
+shifts, notebook topics).
 
 ## Usage
 
 ```rust
-let project = zaf_mpp::read_mpp("plan.mpp")?;
+// Auto-detects MPP, XER, or PMXML from the file content:
+let project = zaf_mpp::read_project("plan.mpp")?;
 
 for task in &project.tasks {
     println!("{}: {:?}", task.id, task.name);
 }
 ```
 
-`read_mpp_bytes` is also available for callers that already have the file
-in memory. Both return `Result<Project, MppError>`.
+Per-format entry points (`read_mpp`, `read_xer`, `read_pmxml`) and
+`*_bytes` variants for in-memory buffers are also available. All return
+`Result<Project, MppError>`.
 
 A C ABI is provided for applications that link the `cdylib` build target
-dynamically; see the rustdoc on `ffi::zaf_mpp_parse`.
+dynamically; see the rustdoc on `ffi::zaf_mpp_parse` (MPP-only, kept for
+ABI stability) and `ffi::zaf_mpp_parse_project` (format auto-detecting).
 
 ## Install
 
@@ -48,8 +65,9 @@ zaf-mpp = { git = "https://github.com/zenith-consulting-services/zaf-mpp" }
 ## Licence
 
 zaf-mpp is a derivative work of MPXJ. All knowledge of the MPP14 binary
-format encoded in this crate, including block layouts, field maps, and
-format-specific quirks, comes from the MPXJ source. Credit for that work
+format and of the Primavera XER/PMXML formats encoded in this crate,
+including block layouts, field maps, table mappings, and format-specific
+quirks, comes from the MPXJ source. Credit for that work
 belongs to Jon Iles and the MPXJ contributors.
 
 This crate is licensed under the GNU Lesser General Public License,

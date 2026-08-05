@@ -27,3 +27,39 @@ pub fn parse_mpp_bytes(bytes: Vec<u8>) -> Result<Project, MppError> {
 pub fn parse_mpp_file(path: String) -> Result<Project, MppError> {
     crate::read_mpp(path)
 }
+
+/// Parse a Primavera P6 XER export already loaded into memory. Mirrors
+/// [`crate::read_xer_bytes`].
+pub fn parse_xer_bytes(bytes: Vec<u8>) -> Result<Project, MppError> {
+    crate::read_xer_bytes(&bytes)
+}
+
+/// Parse a Primavera P6 XER export from a filesystem path. Mirrors
+/// [`crate::read_xer`].
+pub fn parse_xer_file(path: String) -> Result<Project, MppError> {
+    crate::read_xer(path)
+}
+
+/// Parse a Primavera P6 PMXML export already loaded into memory. Mirrors
+/// [`crate::read_pmxml_bytes`].
+pub fn parse_pmxml_bytes(bytes: Vec<u8>) -> Result<Project, MppError> {
+    crate::read_pmxml_bytes(&bytes)
+}
+
+/// Parse a Primavera P6 PMXML export from a filesystem path. Mirrors
+/// [`crate::read_pmxml`].
+pub fn parse_pmxml_file(path: String) -> Result<Project, MppError> {
+    crate::read_pmxml(path)
+}
+
+/// Parse a schedule file of any supported format (MPP14, XER, PMXML),
+/// detected from its content. Mirrors [`crate::read_project_bytes`].
+pub fn parse_project_bytes(bytes: Vec<u8>) -> Result<Project, MppError> {
+    crate::read_project_bytes(&bytes)
+}
+
+/// Parse a schedule file of any supported format from a filesystem path.
+/// Mirrors [`crate::read_project`].
+pub fn parse_project_file(path: String) -> Result<Project, MppError> {
+    crate::read_project(path)
+}

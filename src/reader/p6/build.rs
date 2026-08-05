@@ -340,7 +340,14 @@ pub(crate) fn build_project(data: P6Data) -> MppResult<Project> {
         if let Some(&(cost, actual, target)) = task_cost.get(&task.unique_id) {
             task.cost = Some(cost);
             task.actual_cost = Some(actual);
-            task.baseline.cost = Some(target);
+            // Keep the baseline coherent: no planned cost on a task whose
+            // baseline is otherwise absent (see the presence gate above).
+            if task.baseline.start.is_some()
+                || task.baseline.finish.is_some()
+                || task.baseline.duration.is_some()
+            {
+                task.baseline.cost = Some(target);
+            }
         }
     }
 
@@ -524,15 +531,22 @@ fn new_activity_task(
         constraint_type: constraint_type_from_xer(a.cstr_type.as_deref()),
         constraint_date: a.cstr_date,
         calendar_unique_id: a.clndr_id,
-        baseline: Baseline {
-            // P6's planned ("target") values play the baseline role when
-            // no separate baseline project is attached, matching MPXJ's
-            // PLANNED_ATTRIBUTES baseline strategy.
-            start: a.target_start_date,
-            finish: a.target_end_date,
-            duration: a.target_drtn_hr_cnt.map(hours),
-            work: target_work.map(hours),
-            cost: None, // rolled up from assignments later
+        // P6's planned ("target") values play the baseline role when no
+        // separate baseline project is attached, matching MPXJ's
+        // PLANNED_ATTRIBUTES baseline strategy. Genuine P6 exports always
+        // carry planned dates; the presence gate only matters for sparse
+        // synthetic files, where an activity without planned dates should
+        // read as "no baseline" rather than inheriting a baseline duration.
+        baseline: if a.target_start_date.is_some() || a.target_end_date.is_some() {
+            Baseline {
+                start: a.target_start_date,
+                finish: a.target_end_date,
+                duration: a.target_drtn_hr_cnt.map(hours),
+                work: target_work.map(hours),
+                cost: None, // rolled up from assignments later
+            }
+        } else {
+            Baseline::default()
         },
         ..blank_task(unique_id)
     }

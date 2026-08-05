@@ -105,15 +105,20 @@ pub(crate) fn build_project(data: P6Data) -> MppResult<Project> {
             None => orphan_activities.push(a),
         }
     }
+    let activity_order = |a: &&P6Activity, b: &&P6Activity| {
+        // MPXJ's ActivitySorter orders sibling activities by Activity ID
+        // using an alphanumeric comparator, so "A9" sorts before "A10"
+        // (plain string order would put "A10" first).
+        natural_cmp(
+            a.task_code.as_deref().unwrap_or(""),
+            b.task_code.as_deref().unwrap_or(""),
+        )
+        .then(a.task_id.cmp(&b.task_id))
+    };
     for children in activity_children.values_mut() {
-        // MPXJ's ActivitySorter orders sibling activities by Activity ID.
-        children.sort_by(|a, b| {
-            (a.task_code.as_deref(), a.task_id).cmp(&(b.task_code.as_deref(), b.task_id))
-        });
+        children.sort_by(activity_order);
     }
-    orphan_activities.sort_by(|a, b| {
-        (a.task_code.as_deref(), a.task_id).cmp(&(b.task_code.as_deref(), b.task_id))
-    });
+    orphan_activities.sort_by(activity_order);
 
     // Remap any activity IDs that collide with WBS IDs, and remember the
     // mapping for predecessor / assignment foreign keys.
@@ -810,6 +815,61 @@ fn working_hours_between(
     total
 }
 
+/// Alphanumeric ("natural") string ordering: digit runs compare as
+/// numbers, other runs as text. Ported in spirit from MPXJ's
+/// AlphanumComparator, which ActivitySorter uses for Activity IDs.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut ai = a.chars().peekable();
+    let mut bi = b.chars().peekable();
+    loop {
+        match (ai.peek().copied(), bi.peek().copied()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(x), Some(y)) => {
+                if x.is_ascii_digit() && y.is_ascii_digit() {
+                    let mut na = String::new();
+                    while let Some(&c) = ai.peek() {
+                        if c.is_ascii_digit() {
+                            na.push(c);
+                            ai.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    let mut nb = String::new();
+                    while let Some(&c) = bi.peek() {
+                        if c.is_ascii_digit() {
+                            nb.push(c);
+                            bi.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    // Compare as numbers: longer (trimmed) digit run wins,
+                    // then lexicographic on equal length.
+                    let ta = na.trim_start_matches('0');
+                    let tb = nb.trim_start_matches('0');
+                    let ord = ta
+                        .len()
+                        .cmp(&tb.len())
+                        .then_with(|| ta.cmp(tb))
+                        .then_with(|| na.len().cmp(&nb.len()));
+                    if ord != std::cmp::Ordering::Equal {
+                        return ord;
+                    }
+                } else {
+                    if x != y {
+                        return x.cmp(&y);
+                    }
+                    ai.next();
+                    bi.next();
+                }
+            }
+        }
+    }
+}
+
 fn min_option<T: Ord + Copy>(a: Option<T>, b: Option<T>) -> Option<T> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a.min(b)),
@@ -973,5 +1033,21 @@ mod tests {
         let from = crate::util::MppDate::new(2026, 3, 2);
         let to = crate::util::MppDate::new(2026, 3, 8);
         assert!((working_hours_between(&cal, from, to) - 40.0).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod natural_cmp_tests {
+    use super::natural_cmp;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn digit_runs_compare_numerically() {
+        assert_eq!(natural_cmp("A9", "A10"), Ordering::Less);
+        assert_eq!(natural_cmp("A10", "A9"), Ordering::Greater);
+        assert_eq!(natural_cmp("A1000", "A1010"), Ordering::Less);
+        assert_eq!(natural_cmp("A2", "A2"), Ordering::Equal);
+        assert_eq!(natural_cmp("A02", "A2"), Ordering::Greater);
+        assert_eq!(natural_cmp("B1", "A2"), Ordering::Greater);
     }
 }

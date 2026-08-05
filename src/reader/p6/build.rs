@@ -445,6 +445,9 @@ fn new_activity_task(
             0.0
         }
     });
+    // Snap float-division noise (11.000000000000004 -> 11.0) without
+    // losing genuine sub-percent precision.
+    let percent_complete = (percent_complete * 10_000.0).round() / 10_000.0;
 
     // Start/finish selection chains, ported from the populateField calls
     // in TableProjectReader / XmlProjectReader: exported value (PMXML

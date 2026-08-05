@@ -130,7 +130,40 @@ pub unsafe extern "C" fn zaf_mpp_parse(bytes: *const c_uchar, len: usize) -> *mu
     string_to_raw(json)
 }
 
-/// Free a string previously returned by [`zaf_mpp_parse`].
+/// Parse a schedule file of any supported format (MPP14, Primavera P6 XER
+/// or PMXML, detected from the buffer's content — see
+/// [`crate::read_project_bytes`]) and return the same JSON envelope as
+/// [`zaf_mpp_parse`]. That function remains MPP-only for ABI stability;
+/// this one is the format-agnostic entry point.
+///
+/// # Safety
+///
+/// `bytes` must be valid for reads of `len` bytes for the duration of this
+/// call, or null (treated as empty).
+#[no_mangle]
+pub unsafe extern "C" fn zaf_mpp_parse_project(bytes: *const c_uchar, len: usize) -> *mut c_char {
+    let slice: &[u8] = if bytes.is_null() {
+        &[]
+    } else {
+        slice::from_raw_parts(bytes, len)
+    };
+
+    let result = panic::catch_unwind(AssertUnwindSafe(|| crate::read_project_bytes(slice)));
+
+    let json = match result {
+        Ok(Ok(project)) => match serde_json::to_string(&Envelope::Ok(Box::new(project))) {
+            Ok(json) => json,
+            Err(e) => error_json("corrupt", e.to_string()),
+        },
+        Ok(Err(e)) => error_json(e.kind(), e.to_string()),
+        Err(payload) => error_json("panic", panic_message(&*payload)),
+    };
+
+    string_to_raw(json)
+}
+
+/// Free a string previously returned by [`zaf_mpp_parse`] or
+/// [`zaf_mpp_parse_project`].
 ///
 /// # Safety
 ///
@@ -206,6 +239,36 @@ mod tests {
         assert!(json.starts_with("{\"ok\":"));
         assert!(json.contains("\"tasks\""));
         assert!(json.contains("Task #1"));
+    }
+
+    #[test]
+    fn parse_project_detects_and_parses_an_xer_buffer() {
+        let Some(bytes) = corpus_file("PredecessorCalendar.xer") else {
+            eprintln!(
+                "skipping: PredecessorCalendar.xer not found, run scripts/fetch-test-data.sh first"
+            );
+            return;
+        };
+
+        let ptr = unsafe { zaf_mpp_parse_project(bytes.as_ptr(), bytes.len()) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CString::from_raw(ptr) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(json.starts_with("{\"ok\":"));
+        assert!(json.contains("TEST PROJECT"));
+    }
+
+    #[test]
+    fn parse_project_rejects_unknown_content_with_typed_error() {
+        let bytes = b"neither mpp nor xer nor xml";
+        let ptr = unsafe { zaf_mpp_parse_project(bytes.as_ptr(), bytes.len()) };
+        let json = unsafe { CString::from_raw(ptr) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(json.contains("\"kind\":\"unsupported_version\""));
     }
 
     #[test]

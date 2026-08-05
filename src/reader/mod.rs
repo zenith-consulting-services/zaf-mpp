@@ -9,6 +9,7 @@
 
 mod field_map;
 mod mpp14;
+pub(crate) mod p6;
 
 use crate::container::comp_obj::CompObj;
 use crate::container::OleContainer;

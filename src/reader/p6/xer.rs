@@ -38,9 +38,9 @@ fn cp1252_char(b: u8) -> char {
     const HIGH: [char; 32] = [
         '\u{20AC}', '\u{81}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}',
         '\u{2021}', '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{8D}',
-        '\u{017D}', '\u{8F}', '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}',
-        '\u{2022}', '\u{2013}', '\u{2014}', '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}',
-        '\u{0153}', '\u{9D}', '\u{017E}', '\u{0178}',
+        '\u{017D}', '\u{8F}', '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}',
+        '\u{2013}', '\u{2014}', '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}',
+        '\u{9D}', '\u{017E}', '\u{0178}',
     ];
     match b {
         0x80..=0x9F => HIGH[(b - 0x80) as usize],
@@ -139,10 +139,7 @@ fn parse(bytes: &[u8]) -> MppResult<P6Data> {
                 header_currency = record.get(8).cloned();
             }
             "%T" => {
-                let name = record
-                    .get(1)
-                    .map(|n| n.to_lowercase())
-                    .unwrap_or_default();
+                let name = record.get(1).map(|n| n.to_lowercase()).unwrap_or_default();
                 if REQUIRED_TABLES.contains(&name.as_str()) {
                     tables.entry(name.clone()).or_default();
                     current = Some(name);
@@ -358,8 +355,7 @@ fn parse(bytes: &[u8]) -> MppResult<P6Data> {
     for_each(
         "taskpred",
         Box::new(|row| {
-            let (Some(task_id), Some(pred_task_id)) =
-                (row.i32("task_id"), row.i32("pred_task_id"))
+            let (Some(task_id), Some(pred_task_id)) = (row.i32("task_id"), row.i32("pred_task_id"))
             else {
                 return;
             };
@@ -419,8 +415,7 @@ fn parse(bytes: &[u8]) -> MppResult<P6Data> {
     for_each(
         "taskrsrc",
         Box::new(|row| {
-            let (Some(taskrsrc_id), Some(task_id)) =
-                (row.i32("taskrsrc_id"), row.i32("task_id"))
+            let (Some(taskrsrc_id), Some(task_id)) = (row.i32("taskrsrc_id"), row.i32("task_id"))
             else {
                 return;
             };
@@ -528,9 +523,8 @@ fn apply_calendar_data(calendar: &mut P6Calendar, clndr_data: &str) {
 
     if let Some(exceptions) = base.child("Exceptions") {
         for exception in &exceptions.children {
-            let Some(days_from_epoch) = exception
-                .attribute("d")
-                .and_then(|d| d.parse::<i64>().ok())
+            let Some(days_from_epoch) =
+                exception.attribute("d").and_then(|d| d.parse::<i64>().ok())
             else {
                 continue;
             };
@@ -663,10 +657,7 @@ mod tests {
             crate::model::ConstraintType::FinishOn
         );
         // Finish milestone: start mirrors finish.
-        assert_eq!(
-            milestone.start.unwrap().to_string(),
-            "2023-04-21T16:00:00"
-        );
+        assert_eq!(milestone.start.unwrap().to_string(), "2023-04-21T16:00:00");
         assert_eq!(milestone.start, milestone.finish);
         // Predecessor list.
         assert_eq!(milestone.predecessors.len(), 1);
@@ -708,7 +699,10 @@ mod tests {
         assert!(!sunday.working);
         // Exception: 45292 days after 1899-12-30 = 2024-01-01, non-working.
         assert_eq!(cal.exceptions.len(), 1);
-        assert_eq!(cal.exceptions[0].from_date.unwrap().to_string(), "2024-01-01");
+        assert_eq!(
+            cal.exceptions[0].from_date.unwrap().to_string(),
+            "2024-01-01"
+        );
         assert!(!cal.exceptions[0].working);
     }
 

@@ -244,13 +244,18 @@ mod tests {
     #[test]
     fn parse_project_detects_and_parses_an_xer_buffer() {
         let Some(bytes) = corpus_file("PredecessorCalendar.xer") else {
-            eprintln!("skipping: PredecessorCalendar.xer not found, run scripts/fetch-test-data.sh first");
+            eprintln!(
+                "skipping: PredecessorCalendar.xer not found, run scripts/fetch-test-data.sh first"
+            );
             return;
         };
 
         let ptr = unsafe { zaf_mpp_parse_project(bytes.as_ptr(), bytes.len()) };
         assert!(!ptr.is_null());
-        let json = unsafe { CString::from_raw(ptr) }.to_str().unwrap().to_string();
+        let json = unsafe { CString::from_raw(ptr) }
+            .to_str()
+            .unwrap()
+            .to_string();
         assert!(json.starts_with("{\"ok\":"));
         assert!(json.contains("TEST PROJECT"));
     }
@@ -259,7 +264,10 @@ mod tests {
     fn parse_project_rejects_unknown_content_with_typed_error() {
         let bytes = b"neither mpp nor xer nor xml";
         let ptr = unsafe { zaf_mpp_parse_project(bytes.as_ptr(), bytes.len()) };
-        let json = unsafe { CString::from_raw(ptr) }.to_str().unwrap().to_string();
+        let json = unsafe { CString::from_raw(ptr) }
+            .to_str()
+            .unwrap()
+            .to_string();
         assert!(json.contains("\"kind\":\"unsupported_version\""));
     }
 

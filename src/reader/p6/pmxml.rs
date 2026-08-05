@@ -343,10 +343,7 @@ fn day_index(name: &str) -> Option<usize> {
 
 /// Parse a PMXML GUID (`{A1B2...}` or bare hex-with-dashes) into raw bytes.
 fn parse_guid(value: Option<&str>) -> Option<[u8; 16]> {
-    let hex: String = value?
-        .chars()
-        .filter(|c| c.is_ascii_hexdigit())
-        .collect();
+    let hex: String = value?.chars().filter(|c| c.is_ascii_hexdigit()).collect();
     if hex.len() != 32 {
         return None;
     }

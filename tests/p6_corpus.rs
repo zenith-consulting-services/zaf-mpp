@@ -51,8 +51,7 @@ fn assert_duration_percent_complete(project: &Project) {
 
 #[test]
 fn xer_percent_complete() {
-    let Some(path) = corpus_file("generated/task-percentcomplete/percent-complete-8.4.xer")
-    else {
+    let Some(path) = corpus_file("generated/task-percentcomplete/percent-complete-8.4.xer") else {
         return;
     };
     let project = zaf_mpp::read_xer(&path).expect("parse percent-complete-8.4.xer");

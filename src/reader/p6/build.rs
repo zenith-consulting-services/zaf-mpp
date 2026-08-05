@@ -166,7 +166,11 @@ pub(crate) fn build_project(data: P6Data) -> MppResult<Project> {
                 let uid = w.wbs_id;
                 tasks.push(new_wbs_task(w, uid, parent_uid, level, &path));
 
-                for a in activity_children.get(&w.wbs_id).map(Vec::as_slice).unwrap_or(&[]) {
+                for a in activity_children
+                    .get(&w.wbs_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[])
+                {
                     let auid = activity_uid[&a.task_id];
                     tasks.push(new_activity_task(
                         a,
@@ -311,10 +315,7 @@ pub(crate) fn build_project(data: P6Data) -> MppResult<Project> {
             unique_id: a.taskrsrc_id,
             task_unique_id: task_uid,
             resource_unique_id: a.rsrc_id,
-            start: a
-                .act_start_date
-                .or(a.restart_date)
-                .or(a.target_start_date),
+            start: a.act_start_date.or(a.restart_date).or(a.target_start_date),
             finish: a.act_end_date.or(a.reend_date).or(a.target_end_date),
             work: work_hours.map(hours),
             actual_work: actual_work_hours.map(hours),
@@ -368,7 +369,13 @@ pub(crate) fn build_project(data: P6Data) -> MppResult<Project> {
     })
 }
 
-fn new_wbs_task(w: &P6Wbs, unique_id: i32, parent_uid: Option<i32>, level: i32, path: &str) -> Task {
+fn new_wbs_task(
+    w: &P6Wbs,
+    unique_id: i32,
+    parent_uid: Option<i32>,
+    level: i32,
+    path: &str,
+) -> Task {
     Task {
         name: w.name.clone(),
         outline_level: level,
@@ -444,12 +451,19 @@ fn new_activity_task(
     // that are running long they can differ from a calendar measurement.
     let target = a.target_drtn_hr_cnt;
     let remain = a.remain_drtn_hr_cnt;
-    let actual_duration = a.act_start_date.map(|_| {
-        (target.unwrap_or(0.0) - remain.unwrap_or(0.0)).max(0.0)
-    });
+    let actual_duration = a
+        .act_start_date
+        .map(|_| (target.unwrap_or(0.0) - remain.unwrap_or(0.0)).max(0.0));
     let duration_hours = a.at_completion_drtn_hr_cnt.or_else(|| {
-        sum_options(&[actual_duration, if a.act_end_date.is_some() { None } else { remain }])
-            .or(target)
+        sum_options(&[
+            actual_duration,
+            if a.act_end_date.is_some() {
+                None
+            } else {
+                remain
+            },
+        ])
+        .or(target)
     });
 
     let actual_work = sum_options(&[a.act_work_qty, a.act_equip_qty]);
@@ -735,7 +749,10 @@ fn build_calendar(c: &P6Calendar) -> Calendar {
 /// order of preference: global preferences (PMXML), the default calendar's
 /// stored hour counts (XER), a computation from the default calendar's
 /// working week, then MS Project's standard 480/2400/20.
-fn calendar_period_minutes(data: &P6Data, default_calendar: Option<&P6Calendar>) -> (i32, i32, i32) {
+fn calendar_period_minutes(
+    data: &P6Data,
+    default_calendar: Option<&P6Calendar>,
+) -> (i32, i32, i32) {
     let computed = default_calendar.map(|c| {
         let mut minutes_per_week = 0.0;
         let mut working_days = 0;

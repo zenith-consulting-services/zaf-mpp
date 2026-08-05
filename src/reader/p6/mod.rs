@@ -567,7 +567,10 @@ mod tests {
         assert_eq!(activity_type_from_xml("Start Milestone"), Some("TT_Mile"));
         assert_eq!(activity_status_from_xml("Completed"), Some("TK_Complete"));
         assert_eq!(relation_type_from_xml("Start to Start"), Some("PR_SS"));
-        assert_eq!(constraint_type_from_xml("Mandatory Finish"), Some("CS_MANDFIN"));
+        assert_eq!(
+            constraint_type_from_xml("Mandatory Finish"),
+            Some("CS_MANDFIN")
+        );
         assert_eq!(resource_type_from_xml("Nonlabor"), Some("RT_Equip"));
         assert_eq!(resource_type_from_xml("???"), None);
     }

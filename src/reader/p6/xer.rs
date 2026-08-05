@@ -612,7 +612,7 @@ mod tests {
         assert!(root.summary);
         assert_eq!(root.name.as_deref(), Some("Sample Project"));
         assert_eq!(root.outline_level, 1);
-        assert_eq!(root.id, 1);
+        assert_eq!(root.id, 0);
 
         let phase = &project.tasks[1];
         assert!(phase.summary);

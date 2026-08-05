@@ -228,9 +228,11 @@ pub(crate) fn build_project(data: P6Data) -> MppResult<Project> {
         ));
     }
 
-    // Sequential IDs in outline order.
+    // Sequential IDs in outline order, 0-based to match the MPP14 reader's
+    // row numbering (where MS Project's project-summary row takes ID 0):
+    // the root WBS plays that row's role in a P6 file.
     for (idx, task) in tasks.iter_mut().enumerate() {
-        task.id = idx as i32 + 1;
+        task.id = idx as i32;
     }
 
     // The project short name is a code like "PROJ-1"; the display name
@@ -357,6 +359,22 @@ pub(crate) fn build_project(data: P6Data) -> MppResult<Project> {
     // are populated here: dates as min/max over descendants, work/cost as
     // sums, percent complete as a planned-duration-weighted average.
     rollup_summaries(&mut tasks);
+
+    // Summary durations: MS Project stores a scheduler-computed duration
+    // on every summary row; P6 stores none, so measure working time
+    // between the rolled-up start and finish on the default calendar
+    // (whole-day resolution — start/finish times within the day are
+    // ignored, which matches how phase-level durations read in practice).
+    if let Some(cal) = default_calendar {
+        for task in tasks.iter_mut().filter(|t| t.summary) {
+            if task.duration.is_none() {
+                if let (Some(start), Some(finish)) = (task.start, task.finish) {
+                    task.duration =
+                        Some(hours(working_hours_between(cal, start.date, finish.date)));
+                }
+            }
+        }
+    }
 
     // Project start/finish fall back to the task span when the project row
     // didn't carry them.
@@ -625,6 +643,8 @@ fn rollup_summaries(tasks: &mut [Task]) {
         has_baseline_cost: bool,
         weighted_pct: f64,
         weight: f64,
+        baseline_start: Option<crate::util::MppDateTime>,
+        baseline_finish: Option<crate::util::MppDateTime>,
     }
 
     let mut accs: HashMap<i32, Acc> = HashMap::new();
@@ -635,8 +655,10 @@ fn rollup_summaries(tasks: &mut [Task]) {
         // A summary's own weight towards ITS parent is the accumulated
         // weight of its subtree (summaries carry no duration of their
         // own), so a multi-level hierarchy propagates percent complete all
-        // the way to the root.
+        // the way to the root. The exact (unrounded) percentage travels
+        // upward so rounding never compounds across levels.
         let mut subtree_weight = 0.0;
+        let mut subtree_pct_exact = 0.0;
 
         if tasks[idx].summary {
             if let Some(acc) = accs.remove(&uid) {
@@ -653,9 +675,20 @@ fn rollup_summaries(tasks: &mut [Task]) {
                 if acc.has_baseline_cost {
                     t.baseline.cost = Some(acc.baseline_cost);
                 }
+                // Summaries inherit the baseline span of their subtree,
+                // mirroring the stored summary baselines MS Project files
+                // carry (deliverable variance and planned-% need them).
+                t.baseline.start = acc.baseline_start;
+                t.baseline.finish = acc.baseline_finish;
                 if acc.weight > 0.0 {
-                    t.percent_complete = acc.weighted_pct / acc.weight;
+                    // Whole-percent rounding matches MS Project, which
+                    // stores every percent complete as an integer — the
+                    // same schedule then reads identically from either
+                    // format's file. Only the stored value is rounded;
+                    // the exact fraction continues up the hierarchy.
+                    subtree_pct_exact = acc.weighted_pct / acc.weight;
                     subtree_weight = acc.weight;
+                    t.percent_complete = subtree_pct_exact.round();
                 }
             }
         }
@@ -678,20 +711,103 @@ fn rollup_summaries(tasks: &mut [Task]) {
             up.baseline_cost += c;
             up.has_baseline_cost = true;
         }
+        up.baseline_start = min_option(up.baseline_start, t.baseline.start);
+        up.baseline_finish = max_option(up.baseline_finish, t.baseline.finish);
+        // Weight by the current at-completion duration (percent x duration
+        // is then the actual duration, so the rollup reproduces MS
+        // Project's sum(actual)/sum(duration) exactly); planned duration
+        // only as a fallback.
         let weight = if t.summary {
             subtree_weight
         } else {
-            t.baseline
-                .duration
-                .or(t.duration)
+            t.duration
+                .or(t.baseline.duration)
                 .map(|d| d.value)
                 .unwrap_or(0.0)
         };
         if weight > 0.0 {
-            up.weighted_pct += t.percent_complete * weight;
+            let pct = if t.summary {
+                subtree_pct_exact
+            } else {
+                t.percent_complete
+            };
+            up.weighted_pct += pct * weight;
             up.weight += weight;
         }
     }
+}
+
+/// Days from 1970-01-01 (Howard Hinnant's days-from-civil algorithm).
+fn days_from_civil(date: crate::util::MppDate) -> i64 {
+    let (mut y, m, d) = (date.year as i64, date.month as i64, date.day as i64);
+    if m <= 2 {
+        y -= 1;
+    }
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Day of week, Sunday = 0 (1970-01-01 was a Thursday).
+fn weekday_index(date: crate::util::MppDate) -> usize {
+    ((days_from_civil(date) + 4).rem_euclid(7)) as usize
+}
+
+/// Working hours between two dates (inclusive) on a P6 calendar: sum of
+/// each day's working ranges, with single-day exceptions overriding the
+/// weekday pattern.
+fn working_hours_between(
+    cal: &P6Calendar,
+    from: crate::util::MppDate,
+    to: crate::util::MppDate,
+) -> f64 {
+    if to < from {
+        return 0.0;
+    }
+    let range_hours = |ranges: &[(u32, u32)]| -> f64 {
+        ranges
+            .iter()
+            .map(|&(s, e)| (e.saturating_sub(s)) as f64 / 3600.0)
+            .sum()
+    };
+    // A calendar with no day data at all reads as a standard Mon-Fri
+    // 08:00-16:00 week, the same fallback build_calendar applies.
+    let default_week: [Vec<(u32, u32)>; 7] = std::array::from_fn(|i| {
+        if (1..=5).contains(&i) {
+            vec![(8 * 3600, 16 * 3600)]
+        } else {
+            Vec::new()
+        }
+    });
+    let no_day_data = cal.days.iter().all(|d| !d.present);
+    let day_ranges = |weekday: usize| -> &[(u32, u32)] {
+        if no_day_data {
+            &default_week[weekday]
+        } else {
+            &cal.days[weekday].ranges
+        }
+    };
+    let exceptions: HashMap<crate::util::MppDate, f64> = cal
+        .exceptions
+        .iter()
+        .map(|e| (e.date, range_hours(&e.ranges)))
+        .collect();
+
+    let mut total = 0.0;
+    let mut day = from;
+    loop {
+        total += exceptions
+            .get(&day)
+            .copied()
+            .unwrap_or_else(|| range_hours(day_ranges(weekday_index(day))));
+        if day >= to {
+            break;
+        }
+        day = day.plus_days(1);
+    }
+    total
 }
 
 fn min_option<T: Ord + Copy>(a: Option<T>, b: Option<T>) -> Option<T> {
@@ -832,4 +948,30 @@ fn calendar_period_minutes(
         minutes_per_week.round() as i32,
         days_per_month as i32,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn weekday_index_matches_known_dates() {
+        // 2026-03-02 is a Monday, 1970-01-01 a Thursday, 1899-12-30 a Saturday.
+        assert_eq!(weekday_index(crate::util::MppDate::new(2026, 3, 2)), 1);
+        assert_eq!(weekday_index(crate::util::MppDate::new(1970, 1, 1)), 4);
+        assert_eq!(weekday_index(crate::util::MppDate::new(1899, 12, 30)), 6);
+    }
+
+    #[test]
+    fn working_hours_between_counts_a_standard_week() {
+        let mut cal = P6Calendar::default();
+        for i in 1..=5 {
+            cal.days[i].present = true;
+            cal.days[i].ranges = vec![(8 * 3600, 16 * 3600)];
+        }
+        // Mon 2026-03-02 through Sun 2026-03-08: five 8h days.
+        let from = crate::util::MppDate::new(2026, 3, 2);
+        let to = crate::util::MppDate::new(2026, 3, 8);
+        assert!((working_hours_between(&cal, from, to) - 40.0).abs() < 1e-9);
+    }
 }

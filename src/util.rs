@@ -58,7 +58,29 @@ impl MppDate {
     }
 
     /// Add (or subtract, if negative) a number of days.
+    ///
+    /// Valid dates go through a constant-time day-number conversion; an
+    /// out-of-range `day` (a hand-built `MppDate`) falls back to the
+    /// month-by-month walk, which normalises it the same way.
     pub fn plus_days(self, days: i64) -> MppDate {
+        if (1..=12).contains(&self.month)
+            && self.day >= 1
+            && (self.day as i64) <= days_in_month(self.year, self.month)
+        {
+            if let Some(total) = days_from_civil(self.year, self.month, self.day).checked_add(days)
+            {
+                if let Some(date) = civil_from_days(total) {
+                    return date;
+                }
+            }
+        }
+        self.plus_days_walk(days)
+    }
+
+    /// Month-by-month day arithmetic: the original implementation, kept
+    /// for inputs the fast path doesn't cover and as the reference the
+    /// fast path is tested against.
+    fn plus_days_walk(self, days: i64) -> MppDate {
         let mut year = self.year;
         let mut month = self.month;
         let mut day = self.day as i64 + days;
@@ -89,6 +111,36 @@ impl MppDate {
             day: day as u8,
         }
     }
+}
+
+/// Days since 1970-01-01 in the proleptic Gregorian calendar (Howard
+/// Hinnant's `days_from_civil`). `month` must be 1-12.
+fn days_from_civil(year: i32, month: u8, day: u8) -> i64 {
+    let (m, d) = (month as i64, day as i64);
+    let y = year as i64 - if m <= 2 { 1 } else { 0 };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// Inverse of [`days_from_civil`]; `None` if the year doesn't fit an `i32`.
+fn civil_from_days(z: i64) -> Option<MppDate> {
+    let z = z.checked_add(719468)?;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
+    let year = yoe.checked_add(era.checked_mul(400)?)? + if month <= 2 { 1 } else { 0 };
+    Some(MppDate {
+        year: i32::try_from(year).ok()?,
+        month,
+        day,
+    })
 }
 
 /// Naive local date+time, matching MPXJ's use of `java.time.LocalDateTime`.
@@ -603,6 +655,35 @@ mod tests {
         // 4800 tenths-of-a-minute per day (8 hour day).
         let d = duration_from_raw(4800.0, TimeUnit::Days);
         assert!((d.value - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn plus_days_fast_path_matches_month_walk() {
+        let starts = [
+            EPOCH_DATE,
+            MppDate::new(1899, 12, 30),
+            MppDate::new(1900, 2, 28),
+            MppDate::new(2000, 2, 29),
+            MppDate::new(2024, 1, 31),
+            MppDate::new(1, 1, 1),
+            MppDate::new(-4, 3, 1),
+        ];
+        for start in starts {
+            for days in (-200_000i64..200_000)
+                .step_by(7)
+                .chain([-1, 0, 1, 59, 60, 365, 366])
+            {
+                assert_eq!(
+                    start.plus_days(days),
+                    start.plus_days_walk(days),
+                    "{start} + {days}"
+                );
+            }
+        }
+        // Out-of-range day components still normalise like the walk.
+        let odd = MppDate::new(2023, 2, 31);
+        assert_eq!(odd.plus_days(0), odd.plus_days_walk(0));
+        assert_eq!(odd.plus_days(10), MppDate::new(2023, 3, 13));
     }
 
     #[test]

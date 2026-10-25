@@ -57,7 +57,11 @@ impl<F: Read + Seek> OleContainer<F> {
             .file
             .open_stream(path)
             .map_err(|e| MppError::Corrupt(format!("missing stream {path}: {e}")))?;
-        let mut buf = Vec::new();
+        // Size the buffer up front: growing it while reading costs a
+        // realloc and copy per doubling. Capped so a corrupt length field
+        // cannot request a huge allocation before the read fails.
+        let capacity = usize::try_from(stream.len()).unwrap_or(0).min(64 << 20);
+        let mut buf = Vec::with_capacity(capacity);
         stream
             .read_to_end(&mut buf)
             .map_err(|e| MppError::Corrupt(format!("failed to read stream {path}: {e}")))?;

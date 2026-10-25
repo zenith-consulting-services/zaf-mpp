@@ -61,55 +61,124 @@ impl<'a> Var2Data<'a> {
     }
 
     pub fn unicode_string(&self, id: i32, field_type: i32) -> Option<String> {
-        self.byte_array(id, field_type)
-            .map(|v| get_unicode_string(v, 0))
+        decode_unicode_string(self.byte_array(id, field_type))
     }
 
     pub fn string(&self, id: i32, field_type: i32) -> Option<String> {
-        self.byte_array(id, field_type).map(|v| get_string(v, 0))
+        decode_string(self.byte_array(id, field_type))
     }
 
     pub fn timestamp(&self, id: i32, field_type: i32) -> Option<MppDateTime> {
-        let v = self.byte_array(id, field_type)?;
-        if v.len() < 4 {
-            return None;
-        }
-        get_timestamp(v, 0)
+        decode_timestamp(self.byte_array(id, field_type))
     }
 
     pub fn short(&self, id: i32, field_type: i32) -> i32 {
-        match self.byte_array(id, field_type) {
-            Some(v) if v.len() >= 2 => get_short(v, 0),
-            _ => 0,
-        }
+        decode_short(self.byte_array(id, field_type))
     }
 
     pub fn int(&self, id: i32, field_type: i32) -> i32 {
-        match self.byte_array(id, field_type) {
-            Some(v) if v.len() >= 4 => get_int(v, 0),
-            _ => 0,
-        }
+        decode_int(self.byte_array(id, field_type))
     }
 
     pub fn long(&self, id: i32, field_type: i32) -> i64 {
-        match self.byte_array(id, field_type) {
-            Some(v) if v.len() >= 8 => get_long(v, 0),
-            _ => 0,
-        }
+        decode_long(self.byte_array(id, field_type))
     }
 
     pub fn double(&self, id: i32, field_type: i32) -> f64 {
-        let bits = self.long(id, field_type);
-        let result = f64::from_bits(bits as u64);
-        if result.is_nan() {
-            0.0
-        } else {
-            result
+        decode_double(self.byte_array(id, field_type))
+    }
+
+    /// Every field of one entity, for readers that look up many fields of
+    /// the same unique ID: each lookup then searches only that entity's
+    /// entries. Returns the same values as the `(id, field_type)` methods.
+    pub(crate) fn entity(&self, id: i32) -> EntityVars<'_, 'a> {
+        EntityVars {
+            var_data: self,
+            entries: self.meta.entity(id),
         }
     }
 
     pub fn var_meta(&self) -> &VarMeta {
         self.meta
+    }
+}
+
+/// One entity's fields in a [`Var2Data`] block; see [`Var2Data::entity`].
+pub(crate) struct EntityVars<'v, 'a> {
+    var_data: &'v Var2Data<'a>,
+    entries: &'v [(i32, i32, i32)],
+}
+
+impl<'a> EntityVars<'_, 'a> {
+    pub fn byte_array(&self, field_type: i32) -> Option<&'a [u8]> {
+        let offset = self
+            .entries
+            .binary_search_by_key(&field_type, |e| e.1)
+            .ok()
+            .map(|i| self.entries[i].2);
+        self.var_data.bytes_at_offset(offset)
+    }
+
+    pub fn unicode_string(&self, field_type: i32) -> Option<String> {
+        decode_unicode_string(self.byte_array(field_type))
+    }
+
+    pub fn string(&self, field_type: i32) -> Option<String> {
+        decode_string(self.byte_array(field_type))
+    }
+
+    pub fn timestamp(&self, field_type: i32) -> Option<MppDateTime> {
+        decode_timestamp(self.byte_array(field_type))
+    }
+
+    pub fn double(&self, field_type: i32) -> f64 {
+        decode_double(self.byte_array(field_type))
+    }
+}
+
+fn decode_unicode_string(v: Option<&[u8]>) -> Option<String> {
+    v.map(|v| get_unicode_string(v, 0))
+}
+
+fn decode_string(v: Option<&[u8]>) -> Option<String> {
+    v.map(|v| get_string(v, 0))
+}
+
+fn decode_timestamp(v: Option<&[u8]>) -> Option<MppDateTime> {
+    let v = v?;
+    if v.len() < 4 {
+        return None;
+    }
+    get_timestamp(v, 0)
+}
+
+fn decode_short(v: Option<&[u8]>) -> i32 {
+    match v {
+        Some(v) if v.len() >= 2 => get_short(v, 0),
+        _ => 0,
+    }
+}
+
+fn decode_int(v: Option<&[u8]>) -> i32 {
+    match v {
+        Some(v) if v.len() >= 4 => get_int(v, 0),
+        _ => 0,
+    }
+}
+
+fn decode_long(v: Option<&[u8]>) -> i64 {
+    match v {
+        Some(v) if v.len() >= 8 => get_long(v, 0),
+        _ => 0,
+    }
+}
+
+fn decode_double(v: Option<&[u8]>) -> f64 {
+    let result = f64::from_bits(decode_long(v) as u64);
+    if result.is_nan() {
+        0.0
+    } else {
+        result
     }
 }
 
@@ -303,6 +372,28 @@ mod tests {
         let meta = VarMeta::parse(&meta_bytes).unwrap();
         let var_data = Var2Data::parse(&meta, &data);
         assert_eq!(var_data.double(1, 5), 0.0);
+    }
+
+    #[test]
+    fn entity_view_matches_id_and_type_lookups() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&le32(4));
+        data.extend_from_slice(b"abcd");
+        data.extend_from_slice(&le32(2));
+        data.extend_from_slice(b"ef");
+        let meta_bytes = build_var_meta(&[(1, 0, 5), (1, 8, 9), (2, 0, 6), (1, 99, 7)]);
+        let meta = VarMeta::parse(&meta_bytes).unwrap();
+        let var_data = Var2Data::parse(&meta, &data);
+        for id in [0, 1, 2, 3] {
+            let vars = var_data.entity(id);
+            for ty in 0..12 {
+                assert_eq!(
+                    vars.byte_array(ty),
+                    var_data.byte_array(id, ty),
+                    "{id}/{ty}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -777,50 +777,49 @@ fn read_tasks(
         // this same fallback as a post-processing pass (see
         // TASK_ESTIMATED_BASELINE_FIELDS in MPPReader.java); we do it
         // inline here.
+        let vars = var_data.entity(unique_id);
         let baseline = Baseline {
-            start: var_data
-                .timestamp(unique_id, baseline_start_key)
-                .or_else(|| var_data.timestamp(unique_id, baseline_estimated_start_key)),
-            finish: var_data
-                .timestamp(unique_id, baseline_finish_key)
-                .or_else(|| var_data.timestamp(unique_id, baseline_estimated_finish_key)),
-            duration: var_data
-                .byte_array(unique_id, baseline_duration_key)
+            start: vars
+                .timestamp(baseline_start_key)
+                .or_else(|| vars.timestamp(baseline_estimated_start_key)),
+            finish: vars
+                .timestamp(baseline_finish_key)
+                .or_else(|| vars.timestamp(baseline_estimated_finish_key)),
+            duration: vars
+                .byte_array(baseline_duration_key)
                 .map(|v| duration_from_raw(get_int(v, 0) as f64, TimeUnit::Days))
                 .or_else(|| {
-                    var_data
-                        .byte_array(unique_id, baseline_estimated_duration_key)
+                    vars.byte_array(baseline_estimated_duration_key)
                         .map(|v| duration_from_raw(get_int(v, 0) as f64, TimeUnit::Days))
                 }),
-            work: work_hours(var_data.double(unique_id, baseline_work_key)),
-            cost: hundredths(var_data.double(unique_id, baseline_cost_key)),
+            work: work_hours(vars.double(baseline_work_key)),
+            cost: hundredths(vars.double(baseline_cost_key)),
         };
 
         let baselines: [Baseline; 10] = std::array::from_fn(|i| {
             let (start_t, finish_t, duration_t, work_t, cost_t) = baseline_n_keys[i];
             let (est_start_t, est_finish_t, est_duration_t) = baseline_n_estimated_keys[i];
             Baseline {
-                start: var_data
-                    .timestamp(unique_id, start_t)
-                    .or_else(|| var_data.timestamp(unique_id, est_start_t)),
-                finish: var_data
-                    .timestamp(unique_id, finish_t)
-                    .or_else(|| var_data.timestamp(unique_id, est_finish_t)),
-                duration: var_data
-                    .byte_array(unique_id, duration_t)
+                start: vars
+                    .timestamp(start_t)
+                    .or_else(|| vars.timestamp(est_start_t)),
+                finish: vars
+                    .timestamp(finish_t)
+                    .or_else(|| vars.timestamp(est_finish_t)),
+                duration: vars
+                    .byte_array(duration_t)
                     .map(|v| duration_from_raw(get_int(v, 0) as f64, TimeUnit::Days))
                     .or_else(|| {
-                        var_data
-                            .byte_array(unique_id, est_duration_t)
+                        vars.byte_array(est_duration_t)
                             .map(|v| duration_from_raw(get_int(v, 0) as f64, TimeUnit::Days))
                     }),
-                work: work_hours(var_data.double(unique_id, work_t)),
-                cost: hundredths(var_data.double(unique_id, cost_t)),
+                work: work_hours(vars.double(work_t)),
+                cost: hundredths(vars.double(cost_t)),
             }
         });
 
-        let name = var_data.unicode_string(unique_id, name_key);
-        let wbs = var_data.unicode_string(unique_id, wbs_key);
+        let name = vars.unicode_string(name_key);
+        let wbs = vars.unicode_string(wbs_key);
 
         let percent_complete = get_short(pick(data, data2, percent_block), percent_off) as f64;
         let cost = hundredths(get_double(pick(data, data2, cost_block), cost_off));
@@ -835,9 +834,7 @@ fn read_tasks(
         ));
         let actual_finish =
             get_timestamp(pick(data, data2, actual_finish_block), actual_finish_off);
-        let notes = var_data
-            .string(unique_id, notes_key)
-            .map(|s| crate::rtf::strip(&s));
+        let notes = vars.string(notes_key).map(|s| crate::rtf::strip(&s));
 
         let early_finish = get_timestamp(pick(data, data2, early_finish_block), early_finish_off);
         let late_start = get_timestamp(pick(data, data2, late_start_block), late_start_off);

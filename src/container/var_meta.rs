@@ -54,8 +54,9 @@ impl VarMeta {
         Ok(VarMeta { entries })
     }
 
-    /// Every entry for one unique ID, sorted by field type.
-    fn entity(&self, unique_id: i32) -> &[(i32, i32, i32)] {
+    /// Every `(unique_id, field_type, offset)` entry for one unique ID,
+    /// sorted by field type.
+    pub(crate) fn entity(&self, unique_id: i32) -> &[(i32, i32, i32)] {
         let start = self.entries.partition_point(|e| e.0 < unique_id);
         let len = self.entries[start..].partition_point(|e| e.0 == unique_id);
         &self.entries[start..start + len]

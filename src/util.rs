@@ -59,11 +59,14 @@ impl MppDate {
 
     /// Add (or subtract, if negative) a number of days.
     ///
-    /// Valid dates go through a constant-time day-number conversion; an
-    /// out-of-range `day` (a hand-built `MppDate`) falls back to the
-    /// month-by-month walk, which normalises it the same way.
+    /// Steps of up to a month (the P6 calendar walk adds one day at a
+    /// time) use the month-by-month walk, which is at most two iterations
+    /// there. Larger steps from a valid date go through a constant-time
+    /// day-number conversion; an out-of-range `day` (a hand-built
+    /// `MppDate`) always uses the walk, which normalises it the same way.
     pub fn plus_days(self, days: i64) -> MppDate {
-        if (1..=12).contains(&self.month)
+        if days.unsigned_abs() > 31
+            && (1..=12).contains(&self.month)
             && self.day >= 1
             && (self.day as i64) <= days_in_month(self.year, self.month)
         {

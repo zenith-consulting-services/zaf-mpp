@@ -16,13 +16,22 @@ pub mod props;
 pub mod var2_data;
 pub mod var_meta;
 
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Seek};
 
 use crate::error::{MppError, MppResult};
 
-/// An open OLE2 compound document, with streams read on demand.
-pub struct OleContainer {
-    file: cfb::CompoundFile<Cursor<Vec<u8>>>,
+/// An open OLE2 compound document, with streams read on demand. The
+/// default type parameter owns its bytes ([`OleContainer::open`]);
+/// [`OleContainer::open_slice`] borrows them instead, avoiding a copy.
+pub struct OleContainer<F = Cursor<Vec<u8>>> {
+    file: cfb::CompoundFile<F>,
+}
+
+impl<'a> OleContainer<Cursor<&'a [u8]>> {
+    /// As [`OleContainer::open`], reading from borrowed bytes.
+    pub fn open_slice(bytes: &'a [u8]) -> MppResult<Self> {
+        Self::open_reader(Cursor::new(bytes))
+    }
 }
 
 impl OleContainer {
@@ -30,8 +39,13 @@ impl OleContainer {
     /// [`MppError::NotACompoundFile`] if `bytes` isn't a valid CFB
     /// container, before any MPP-specific parsing happens.
     pub fn open(bytes: Vec<u8>) -> MppResult<OleContainer> {
-        let cursor = Cursor::new(bytes);
-        let file = cfb::CompoundFile::open(cursor)
+        Self::open_reader(Cursor::new(bytes))
+    }
+}
+
+impl<F: Read + Seek> OleContainer<F> {
+    fn open_reader(reader: F) -> MppResult<Self> {
+        let file = cfb::CompoundFile::open(reader)
             .map_err(|e| MppError::NotACompoundFile { source: e })?;
         Ok(OleContainer { file })
     }

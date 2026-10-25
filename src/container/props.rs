@@ -8,24 +8,31 @@
 //! byte 12) followed by `(size, key, unused)` triples and their payloads,
 //! each payload padded to a two byte boundary.
 
-use std::collections::HashMap;
-
 use crate::util::{get_double, get_int, get_short, get_timestamp, get_unicode_string, MppDateTime};
 
 /// Parsed `Props` stream: a flat map of integer key to byte-array value.
 pub struct Props {
-    map: HashMap<i32, Vec<u8>>,
+    data: Vec<u8>,
+    /// `(key, start, len)` into `data`, sorted by key, one entry per key
+    /// (the later of any repeated key, matching MPXJ's map insert).
+    index: Vec<(i32, usize, usize)>,
 }
 
 impl Props {
     /// Parse a "Props14" stream. Mirrors `Props14(ProjectFile, InputStream)`.
     pub fn parse(data: &[u8]) -> Props {
-        let mut map = HashMap::new();
+        Self::from_vec(data.to_vec())
+    }
+
+    /// As [`Props::parse`], taking ownership of the stream bytes so values
+    /// can be borrowed from them without copying.
+    pub fn from_vec(data: Vec<u8>) -> Props {
+        let mut index = Vec::new();
         if data.len() < 16 {
-            return Props { map };
+            return Props { data, index };
         }
 
-        let header_count = get_short(data, 12) as usize;
+        let header_count = get_short(&data, 12) as usize;
         let mut found_count = 0usize;
         let mut pos = 16usize;
 
@@ -33,8 +40,8 @@ impl Props {
             if pos + 12 > data.len() {
                 break;
             }
-            let attrib1 = get_int(data, pos) as i64;
-            let attrib2 = get_int(data, pos + 4);
+            let attrib1 = get_int(&data, pos) as i64;
+            let attrib2 = get_int(&data, pos + 4);
             // attrib3 (pos + 8) is unused, matching MPXJ.
             pos += 12;
 
@@ -42,10 +49,9 @@ impl Props {
                 break;
             }
             let len = attrib1 as usize;
-            let value = data[pos..pos + len].to_vec();
+            index.push((attrib2, pos, len));
             pos += len;
             found_count += 1;
-            map.insert(attrib2, value);
 
             // Align to a two byte boundary.
             if !len.is_multiple_of(2) {
@@ -53,37 +59,41 @@ impl Props {
             }
         }
 
-        Props { map }
+        crate::util::sort_dedup_keep_last(&mut index, |e| e.0);
+
+        Props { data, index }
+    }
+
+    fn get(&self, key: i32) -> Option<&[u8]> {
+        let i = self.index.binary_search_by_key(&key, |e| e.0).ok()?;
+        let (_, start, len) = self.index[i];
+        Some(&self.data[start..start + len])
     }
 
     pub fn byte_array(&self, key: i32) -> Option<&[u8]> {
-        self.map.get(&key).map(|v| v.as_slice())
+        self.get(key)
     }
 
     pub fn byte(&self, key: i32) -> u8 {
-        self.map
-            .get(&key)
-            .and_then(|v| v.first())
-            .copied()
-            .unwrap_or(0)
+        self.get(key).and_then(|v| v.first()).copied().unwrap_or(0)
     }
 
     pub fn short(&self, key: i32) -> i32 {
-        match self.map.get(&key) {
+        match self.get(key) {
             Some(v) if v.len() >= 2 => get_short(v, 0),
             _ => 0,
         }
     }
 
     pub fn int(&self, key: i32) -> i32 {
-        match self.map.get(&key) {
+        match self.get(key) {
             Some(v) if v.len() >= 4 => get_int(v, 0),
             _ => 0,
         }
     }
 
     pub fn double(&self, key: i32) -> f64 {
-        match self.map.get(&key) {
+        match self.get(key) {
             Some(v) if v.len() >= 8 => get_double(v, 0),
             _ => 0.0,
         }
@@ -94,11 +104,11 @@ impl Props {
     }
 
     pub fn unicode_string(&self, key: i32) -> Option<String> {
-        self.map.get(&key).map(|v| get_unicode_string(v, 0))
+        self.get(key).map(|v| get_unicode_string(v, 0))
     }
 
     pub fn timestamp(&self, key: i32) -> Option<MppDateTime> {
-        let v = self.map.get(&key)?;
+        let v = self.get(key)?;
         get_timestamp(v, 0)
     }
 }

@@ -48,6 +48,8 @@ use crate::util::{
 
 const PROJECT_DIR: &str = "/   114";
 
+type Ole<'a> = OleContainer<std::io::Cursor<&'a [u8]>>;
+
 // PropsKey values, from src/main/java/org/mpxj/mpp/PropsKey.java.
 mod props_key {
     pub const PASSWORD_FLAG: i32 = 893386752;
@@ -72,9 +74,9 @@ mod props_key {
     pub const CRITICAL_SLACK_LIMIT: i32 = 37748756;
 }
 
-pub fn read(container: &mut OleContainer, application_version: Option<u32>) -> MppResult<Project> {
+pub fn read(container: &mut Ole<'_>, application_version: Option<u32>) -> MppResult<Project> {
     let root_props_bytes = container.read_stream("/Props14")?;
-    let root_props = Props::parse(&root_props_bytes);
+    let root_props = Props::from_vec(root_props_bytes);
 
     let password_flag = root_props.byte(props_key::PASSWORD_FLAG);
     let password_required_to_read = password_flag & 0x1 != 0;
@@ -86,7 +88,7 @@ pub fn read(container: &mut OleContainer, application_version: Option<u32>) -> M
     }
 
     let project_props_bytes = container.read_stream(&format!("{PROJECT_DIR}/Props"))?;
-    let project_props = Props::parse(&project_props_bytes);
+    let project_props = Props::from_vec(project_props_bytes);
 
     let properties = read_properties(&project_props, application_version);
 
@@ -158,7 +160,7 @@ fn read_properties(props: &Props, application_version: Option<u32>) -> ProjectPr
 // ---------------------------------------------------------------------
 
 fn read_calendars(
-    container: &mut OleContainer,
+    container: &mut Ole<'_>,
     project_props: &Props,
     resource_calendar_map: &mut HashMap<i32, i32>,
 ) -> MppResult<Vec<Calendar>> {
@@ -496,7 +498,7 @@ fn task_bit_flags(application_version: u32) -> TaskBitFlags {
 }
 
 fn read_tasks(
-    container: &mut OleContainer,
+    container: &mut Ole<'_>,
     project_props: &Props,
     application_version: u32,
     critical_slack_limit_days: i32,
@@ -652,7 +654,9 @@ fn read_tasks(
     // field this reader reads, since the true per-file maximum record size
     // (computed from every field MS Project knows about, not just the
     // ones zaf-mpp reads) isn't reproduced here.
-    let mut task_map: HashMap<i32, usize> = HashMap::new();
+    // `(unique_id, index)`, pushed in descending index order so that
+    // keeping the first entry per unique ID keeps the highest index.
+    let mut task_map: Vec<(i32, usize)> = Vec::new();
     let item_count = fixed_meta.adjusted_item_count();
     for loop_idx in (3..item_count).rev() {
         let (Some(data), Some(_data2)) = (
@@ -678,15 +682,12 @@ fn read_tasks(
             continue; // too little data to trust
         }
         let unique_id = get_int(data, uid_off);
-        task_map.entry(unique_id).or_insert(loop_idx);
+        task_map.push((unique_id, loop_idx));
     }
+    crate::util::sort_dedup_keep_first(&mut task_map, |e| e.0);
 
-    let mut unique_ids: Vec<i32> = task_map.keys().copied().collect();
-    unique_ids.sort_unstable();
-
-    let mut tasks = Vec::with_capacity(unique_ids.len());
-    for unique_id in unique_ids {
-        let index = task_map[&unique_id];
+    let mut tasks = Vec::with_capacity(task_map.len());
+    for (unique_id, index) in task_map {
         let Some(data) = fixed_data.byte_array(index) else {
             continue;
         };
@@ -1027,7 +1028,7 @@ fn generate_auto_wbs(tasks: &mut [Task]) {
 // ---------------------------------------------------------------------
 
 fn read_relations(
-    container: &mut OleContainer,
+    container: &mut Ole<'_>,
     tasks: &mut [Task],
     application_version: u32,
 ) -> MppResult<()> {
@@ -1041,10 +1042,11 @@ fn read_relations(
     let fixed_data_bytes = container.read_stream(&format!("{dir}/FixedData"))?;
     let fixed_data = FixedData::parse_fixed_size(&fixed_data_bytes, 20);
 
-    let mut by_unique_id: HashMap<i32, usize> = HashMap::new();
-    for (i, t) in tasks.iter().enumerate() {
-        by_unique_id.insert(t.unique_id, i);
-    }
+    // `read_tasks` returns tasks in strictly ascending unique ID order
+    // (`link_hierarchy` re-sorts by ID only after this), so look them up
+    // by binary search.
+    debug_assert!(tasks.windows(2).all(|w| w[0].unique_id < w[1].unique_id));
+    let task_index = |unique_id: i32| tasks.binary_search_by_key(&unique_id, |t| t.unique_id).ok();
 
     let count = fixed_meta.adjusted_item_count();
     // Ported from `ConstraintFactory.process`: Project 2013 and later
@@ -1081,10 +1083,10 @@ fn read_relations(
             continue;
         }
 
-        let Some(&successor_idx) = by_unique_id.get(&task_id2) else {
+        let Some(successor_idx) = task_index(task_id2) else {
             continue;
         };
-        if !by_unique_id.contains_key(&task_id1) {
+        if task_index(task_id1).is_none() {
             continue;
         }
 
@@ -1131,7 +1133,7 @@ mod resource_field {
 }
 
 fn read_resources(
-    container: &mut OleContainer,
+    container: &mut Ole<'_>,
     project_props: &Props,
     application_version: u32,
     resource_calendar_map: &HashMap<i32, i32>,
@@ -1189,7 +1191,7 @@ fn read_resources(
     .max()
     .unwrap_or(48);
 
-    let mut resource_map: HashMap<i32, usize> = HashMap::new();
+    let mut resource_map: Vec<(i32, usize)> = Vec::new();
     let item_count = fixed_meta.adjusted_item_count();
     for loop_idx in 0..item_count {
         let Some(data) = fixed_data.byte_array(loop_idx) else {
@@ -1199,15 +1201,12 @@ fn read_resources(
             continue;
         }
         let unique_id = get_short(data, uid_off);
-        resource_map.entry(unique_id).or_insert(loop_idx);
+        resource_map.push((unique_id, loop_idx));
     }
+    crate::util::sort_dedup_keep_first(&mut resource_map, |e| e.0);
 
-    let mut ids: Vec<i32> = resource_map.keys().copied().collect();
-    ids.sort_unstable();
-
-    let mut resources = Vec::with_capacity(ids.len());
-    for id in ids {
-        let index = resource_map[&id];
+    let mut resources = Vec::with_capacity(resource_map.len());
+    for (id, index) in resource_map {
         let Some(data) = fixed_data.byte_array(index) else {
             continue;
         };
@@ -1266,10 +1265,7 @@ mod assignment_field {
     pub const ACTUAL_COST: i32 = 28;
 }
 
-fn read_assignments(
-    container: &mut OleContainer,
-    project_props: &Props,
-) -> MppResult<Vec<Assignment>> {
+fn read_assignments(container: &mut Ole<'_>, project_props: &Props) -> MppResult<Vec<Assignment>> {
     let dir = format!("{PROJECT_DIR}/TBkndAssn");
     if !container.storage_exists(&dir) {
         return Ok(Vec::new());

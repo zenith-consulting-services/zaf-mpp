@@ -24,8 +24,6 @@
 //! synthetic fixtures the property-based corruption tests build by hand
 //! rather than for any real MPP14 file.
 
-use std::collections::HashMap;
-
 use crate::container::props::Props;
 use crate::util::{get_int, get_short};
 
@@ -53,7 +51,9 @@ enum FieldLoc {
 /// A field map read from one project's `Props` block, keyed by the legacy
 /// field ID MPXJ has used since the original MPX format.
 pub struct FieldMap {
-    entries: HashMap<i32, FieldLoc>,
+    /// Sorted by legacy ID, one entry per ID (the later of any repeat,
+    /// matching MPXJ's map insert).
+    entries: Vec<(i32, FieldLoc)>,
 }
 
 impl FieldMap {
@@ -70,13 +70,13 @@ impl FieldMap {
             }
         }
         FieldMap {
-            entries: HashMap::new(),
+            entries: Vec::new(),
         }
     }
 
     /// Ported from `FieldMap.createFieldMap`.
-    fn parse(data: &[u8]) -> HashMap<i32, FieldLoc> {
-        let mut entries = HashMap::new();
+    fn parse(data: &[u8]) -> Vec<(i32, FieldLoc)> {
+        let mut entries = Vec::with_capacity(data.len() / 28);
         let mut last_offset: i32 = 0;
         let mut block_index: usize = 0;
 
@@ -115,11 +115,19 @@ impl FieldMap {
             };
 
             if let Some(loc) = loc {
-                entries.insert(legacy_id, loc);
+                entries.push((legacy_id, loc));
             }
         }
 
+        crate::util::sort_dedup_keep_last(&mut entries, |e| e.0);
         entries
+    }
+
+    fn get(&self, legacy_id: i32) -> Option<&FieldLoc> {
+        self.entries
+            .binary_search_by_key(&legacy_id, |e| e.0)
+            .ok()
+            .map(|i| &self.entries[i].1)
     }
 
     /// Fixed-data location for `legacy_id`, or `(default_block,
@@ -131,7 +139,7 @@ impl FieldMap {
         default_block: usize,
         default_offset: usize,
     ) -> (usize, usize) {
-        match self.entries.get(&legacy_id) {
+        match self.get(legacy_id) {
             Some(FieldLoc::Fixed { block, offset }) => (*block, *offset),
             _ => (default_block, default_offset),
         }
@@ -143,7 +151,7 @@ impl FieldMap {
     /// still goes through the map for consistency and to honour an
     /// explicit override when one is present.
     pub fn var(&self, legacy_id: i32, default_key: i32) -> i32 {
-        match self.entries.get(&legacy_id) {
+        match self.get(legacy_id) {
             Some(FieldLoc::Var { key }) => *key,
             _ => default_key,
         }
@@ -175,7 +183,7 @@ mod tests {
     #[test]
     fn empty_map_falls_back_to_defaults() {
         let map = FieldMap {
-            entries: HashMap::new(),
+            entries: Vec::new(),
         };
         assert_eq!(map.fixed(14, 0, 65535), (0, 65535));
         assert_eq!(map.var(14, 999), 999);

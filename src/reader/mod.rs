@@ -17,7 +17,7 @@ use crate::error::{MppError, MppResult};
 use crate::model::Project;
 
 pub fn read_mpp_bytes(bytes: &[u8]) -> MppResult<Project> {
-    let mut container = OleContainer::open(bytes.to_vec())?;
+    let mut container = OleContainer::open_slice(bytes)?;
 
     let compobj_bytes = container.read_stream("/\u{1}CompObj")?;
     let compobj = CompObj::parse(&compobj_bytes)?;

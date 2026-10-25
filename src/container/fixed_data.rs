@@ -7,8 +7,6 @@
 //! `FixedMeta` block (byte offset 4 of each meta entry), since MS Project
 //! does not store record sizes directly.
 
-use std::collections::HashMap;
-
 use crate::util::get_int;
 
 use super::fixed_meta::FixedMeta;
@@ -20,7 +18,15 @@ pub struct FixedData<'a> {
     /// Maps each record's starting offset back to its index, so relation
     /// and constraint lookups (which address records by offset, not index)
     /// don't need a linear scan per lookup.
-    offset_to_index: HashMap<i32, usize>,
+    offset_to_index: OffsetIndex,
+}
+
+enum OffsetIndex {
+    /// `(offset, index)` sorted by offset; the first index wins where two
+    /// records share an offset.
+    Sorted(Vec<(i32, usize)>),
+    /// Every record is `item_size` bytes, so the index is computed.
+    FixedSize { item_size: usize, item_count: usize },
 }
 
 impl<'a> FixedData<'a> {
@@ -33,7 +39,7 @@ impl<'a> FixedData<'a> {
     ) -> FixedData<'a> {
         let item_count = meta.adjusted_item_count();
         let mut items = Vec::with_capacity(item_count);
-        let mut offset_to_index = HashMap::with_capacity(item_count);
+        let mut offset_to_index = Vec::with_capacity(item_count);
 
         for loop_idx in 0..item_count {
             let meta_data = meta.byte_array(loop_idx);
@@ -76,17 +82,17 @@ impl<'a> FixedData<'a> {
 
             if item_size > 0 {
                 items.push(Some(&data[item_offset..item_offset + item_size]));
-                offset_to_index
-                    .entry(item_offset as i32)
-                    .or_insert(loop_idx);
+                offset_to_index.push((item_offset as i32, loop_idx));
             } else {
                 items.push(None);
             }
         }
 
+        crate::util::sort_dedup_keep_first(&mut offset_to_index, |e| e.0);
+
         FixedData {
             items,
-            offset_to_index,
+            offset_to_index: OffsetIndex::Sorted(offset_to_index),
         }
     }
 
@@ -96,20 +102,17 @@ impl<'a> FixedData<'a> {
         if item_size == 0 {
             return FixedData {
                 items: Vec::new(),
-                offset_to_index: HashMap::new(),
+                offset_to_index: OffsetIndex::Sorted(Vec::new()),
             };
         }
         let item_count = data.len() / item_size;
-        let mut items = Vec::with_capacity(item_count);
-        let mut offset_to_index = HashMap::with_capacity(item_count);
-        for loop_idx in 0..item_count {
-            let offset = loop_idx * item_size;
-            items.push(Some(&data[offset..offset + item_size]));
-            offset_to_index.insert(offset as i32, loop_idx);
-        }
+        let items = data.chunks_exact(item_size).map(Some).collect();
         FixedData {
             items,
-            offset_to_index,
+            offset_to_index: OffsetIndex::FixedSize {
+                item_size,
+                item_count,
+            },
         }
     }
 
@@ -124,7 +127,20 @@ impl<'a> FixedData<'a> {
     /// Index of the item whose record starts at the given data offset, if
     /// any. Mirrors `getIndexFromOffset`.
     pub fn index_from_offset(&self, offset: i32) -> Option<usize> {
-        self.offset_to_index.get(&offset).copied()
+        match &self.offset_to_index {
+            OffsetIndex::Sorted(entries) => entries
+                .binary_search_by_key(&offset, |e| e.0)
+                .ok()
+                .map(|i| entries[i].1),
+            OffsetIndex::FixedSize {
+                item_size,
+                item_count,
+            } => {
+                let offset = usize::try_from(offset).ok()?;
+                let index = offset / item_size;
+                (offset % item_size == 0 && index < *item_count).then_some(index)
+            }
+        }
     }
 }
 

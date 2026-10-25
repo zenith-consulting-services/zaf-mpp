@@ -7,9 +7,6 @@
 //! entity unique ID it records, per field type, the byte offset within the
 //! `Var2Data` stream where that field's value lives.
 
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-
 use crate::error::{corrupt, MppResult};
 use crate::util::get_int;
 
@@ -17,8 +14,10 @@ const MAGIC: i32 = 0xFADFADBAu32 as i32;
 
 /// Parsed `VarMeta` stream (MPP14 uses the "VarMeta12" layout throughout).
 pub struct VarMeta {
-    table: HashMap<i32, BTreeMap<i32, i32>>,
-    offsets: Vec<i32>,
+    /// `(unique_id, field_type, offset)`, sorted by `(unique_id,
+    /// field_type)` with one entry per pair. Where the stream repeats a
+    /// pair, the later entry wins, as it did with MPXJ's map insert.
+    entries: Vec<(i32, i32, i32)>,
 }
 
 impl VarMeta {
@@ -34,8 +33,8 @@ impl VarMeta {
         }
 
         let item_count = get_int(data, 8) as usize;
-        let mut table: HashMap<i32, BTreeMap<i32, i32>> = HashMap::new();
-        let mut offsets = Vec::with_capacity(item_count);
+        let available = (data.len() - 24) / 12;
+        let mut entries = Vec::with_capacity(item_count.min(available));
 
         let mut pos = 24usize;
         for _ in 0..item_count {
@@ -47,53 +46,45 @@ impl VarMeta {
             let ty = crate::util::get_short(data, pos + 8);
             // 2 bytes unknown at pos + 10, skipped.
             pos += 12;
-
-            table.entry(unique_id).or_default().insert(ty, offset);
-            offsets.push(offset);
+            entries.push((unique_id, ty, offset));
         }
 
-        offsets.sort_unstable();
+        crate::util::sort_dedup_keep_last(&mut entries, |&(id, ty, _)| (id, ty));
 
-        Ok(VarMeta { table, offsets })
+        Ok(VarMeta { entries })
+    }
+
+    /// Every entry for one unique ID, sorted by field type.
+    fn entity(&self, unique_id: i32) -> &[(i32, i32, i32)] {
+        let start = self.entries.partition_point(|e| e.0 < unique_id);
+        let len = self.entries[start..].partition_point(|e| e.0 == unique_id);
+        &self.entries[start..start + len]
     }
 
     /// Byte offset within the companion `Var2Data` block for the given
     /// entity unique ID and field type, if present.
     pub fn offset(&self, unique_id: i32, field_type: i32) -> Option<i32> {
-        self.table
-            .get(&unique_id)
-            .and_then(|m| m.get(&field_type))
-            .copied()
+        self.entries
+            .binary_search_by(|e| (e.0, e.1).cmp(&(unique_id, field_type)))
+            .ok()
+            .map(|i| self.entries[i].2)
     }
 
     /// All field type keys recorded for the given entity unique ID.
     pub fn types(&self, unique_id: i32) -> Vec<i32> {
-        self.table
-            .get(&unique_id)
-            .map(|m| m.keys().copied().collect())
-            .unwrap_or_default()
+        self.entity(unique_id).iter().map(|e| e.1).collect()
     }
 
     /// The set of entity unique IDs described by this block.
     pub fn unique_ids(&self) -> Vec<i32> {
-        let mut ids: Vec<i32> = self.table.keys().copied().collect();
-        ids.sort_unstable();
+        let mut ids: Vec<i32> = self.entries.iter().map(|e| e.0).collect();
+        ids.dedup();
         ids
     }
 
     /// True if the given unique ID has any entries in this block.
     pub fn contains_unique_id(&self, unique_id: i32) -> bool {
-        self.table.contains_key(&unique_id)
-    }
-
-    /// Sorted list of data offsets referenced by this block. Not
-    /// deduplicated: two different (unique ID, type) entries can
-    /// legitimately point at the same offset (MS Project deduplicates
-    /// identical values when writing), so the same offset may appear more
-    /// than once here — harmless downstream, since `Var2Data::parse`
-    /// already skips an offset it's seen before.
-    pub(crate) fn offsets(&self) -> &[i32] {
-        &self.offsets
+        !self.entity(unique_id).is_empty()
     }
 }
 
@@ -181,10 +172,22 @@ mod tests {
         data[8..12].copy_from_slice(&le32(2));
 
         let vm = VarMeta::parse(&data).unwrap();
-        let mut types = vm.types(42);
-        types.sort_unstable();
-        assert_eq!(types, vec![14, 16]);
+        assert_eq!(vm.types(42), vec![14, 16]);
         assert!(vm.types(999).is_empty());
+    }
+
+    #[test]
+    fn repeated_id_and_type_keeps_the_later_offset() {
+        let mut data = sample_bytes();
+        data.extend_from_slice(&le32(42));
+        data.extend_from_slice(&le32(200));
+        data.extend_from_slice(&le16(14));
+        data.extend_from_slice(&le16(0));
+        data[8..12].copy_from_slice(&le32(2));
+
+        let vm = VarMeta::parse(&data).unwrap();
+        assert_eq!(vm.offset(42, 14), Some(200));
+        assert_eq!(vm.types(42), vec![14]);
     }
 
     #[test]

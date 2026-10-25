@@ -205,6 +205,20 @@ impl serde::Serialize for MppDateTime {
 /// Epoch used by every date/time field in an MPP file: 1983-12-31.
 pub const EPOCH_DATE: MppDate = MppDate::new(1983, 12, 31);
 
+/// Sort `items` by `key` and keep one item per key: the first one in the
+/// original order. Equivalent to building a map with `entry().or_insert`.
+pub(crate) fn sort_dedup_keep_first<T, K: Ord>(items: &mut Vec<T>, key: impl Fn(&T) -> K) {
+    items.sort_by_key(&key); // stable: equal keys keep their original order
+    items.dedup_by(|later, earlier| key(later) == key(earlier));
+}
+
+/// Sort `items` by `key` and keep one item per key: the last one in the
+/// original order. Equivalent to building a map with repeated `insert`.
+pub(crate) fn sort_dedup_keep_last<T, K: Ord>(items: &mut Vec<T>, key: impl Fn(&T) -> K) {
+    items.reverse();
+    sort_dedup_keep_first(items, key);
+}
+
 /// Ported from `MPPUtility.getByte`.
 pub fn get_byte(data: &[u8], offset: usize) -> u8 {
     data.get(offset).copied().unwrap_or(0)

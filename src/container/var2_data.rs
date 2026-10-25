@@ -11,8 +11,6 @@
 //! the whole stream into memory up front, we index by offset directly
 //! instead, which sidesteps that complexity while producing the same map.
 
-use std::collections::BTreeMap;
-
 use crate::util::{
     get_int, get_long, get_short, get_string, get_timestamp, get_unicode_string, MppDateTime,
 };
@@ -23,45 +21,38 @@ use super::var_meta::VarMeta;
 /// byte offsets recorded in a companion `VarMeta` block.
 pub struct Var2Data<'a> {
     meta: &'a VarMeta,
-    map: BTreeMap<i32, &'a [u8]>,
+    data: &'a [u8],
 }
 
 impl<'a> Var2Data<'a> {
     /// Parse a `Var2Data` stream. Mirrors `Var2Data(ProjectFile, VarMeta,
-    /// InputStream)`: for every offset recorded in `meta`, read a 4 byte
-    /// size prefix followed by that many bytes of value data.
+    /// InputStream)`: every offset recorded in `meta` holds a 4 byte size
+    /// prefix followed by that many bytes of value data.
+    ///
+    /// Values are sliced out on lookup rather than indexed up front: a
+    /// lookup only ever uses an offset taken from `meta`, and the slice
+    /// for an offset depends on nothing but the offset and `data`, so this
+    /// returns exactly what an eager offset-to-value map would.
     pub fn parse(meta: &'a VarMeta, data: &'a [u8]) -> Var2Data<'a> {
-        let mut map = BTreeMap::new();
-
-        for &item_offset in meta.offsets() {
-            if item_offset < 0 {
-                continue;
-            }
-            let item_offset = item_offset as usize;
-            if item_offset >= data.len() || map.contains_key(&(item_offset as i32)) {
-                continue;
-            }
-            if item_offset + 4 > data.len() {
-                continue;
-            }
-            let size = get_int(data, item_offset);
-            if size < 0 {
-                continue;
-            }
-            let size = size as usize;
-            let start = item_offset + 4;
-            let end = start + size;
-            if end > data.len() {
-                continue;
-            }
-            map.insert(item_offset as i32, &data[start..end]);
-        }
-
-        Var2Data { meta, map }
+        Var2Data { meta, data }
     }
 
     fn bytes_at_offset(&self, offset: Option<i32>) -> Option<&'a [u8]> {
-        offset.and_then(|o| self.map.get(&o).copied())
+        let item_offset = offset?;
+        if item_offset < 0 {
+            return None;
+        }
+        let item_offset = item_offset as usize;
+        if item_offset + 4 > self.data.len() {
+            return None;
+        }
+        let size = get_int(self.data, item_offset);
+        if size < 0 {
+            return None;
+        }
+        let start = item_offset + 4;
+        let end = start + size as usize;
+        self.data.get(start..end)
     }
 
     /// Raw bytes for the given entity unique ID and field type.

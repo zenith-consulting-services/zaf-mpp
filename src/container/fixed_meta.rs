@@ -17,9 +17,13 @@ const HEADER_SIZE: usize = 16;
 /// Parsed `FixedMeta` stream: one fixed-size record per entity in the
 /// companion `FixedData` block.
 pub struct FixedMeta {
-    items: Vec<Vec<u8>>,
+    /// Raw stream bytes; item `i` is `item_size` bytes at
+    /// `HEADER_SIZE + i * item_size`.
+    data: Vec<u8>,
+    item_size: usize,
+    item_count: usize,
     /// Item count as reported in the block header, kept for parity with
-    /// MPXJ's `getItemCount` (distinct from `items.len()`, the adjusted count).
+    /// MPXJ's `getItemCount` (distinct from `adjusted_item_count`).
     pub reported_item_count: i32,
 }
 
@@ -81,26 +85,26 @@ impl FixedMeta {
             return Err(corrupt("FixedMeta item size resolved to zero"));
         }
 
-        let adjusted_item_count = (file_size - HEADER_SIZE) / item_size;
-        let mut items = Vec::with_capacity(adjusted_item_count);
-        let mut pos = HEADER_SIZE;
-        for _ in 0..adjusted_item_count {
-            items.push(data[pos..pos + item_size].to_vec());
-            pos += item_size;
-        }
+        let item_count = (file_size - HEADER_SIZE) / item_size;
 
         Ok(FixedMeta {
-            items,
+            data: data.to_vec(),
+            item_size,
+            item_count,
             reported_item_count,
         })
     }
 
     pub fn adjusted_item_count(&self) -> usize {
-        self.items.len()
+        self.item_count
     }
 
     pub fn byte_array(&self, index: usize) -> Option<&[u8]> {
-        self.items.get(index).map(|v| v.as_slice())
+        if index >= self.item_count {
+            return None;
+        }
+        let start = HEADER_SIZE + index * self.item_size;
+        Some(&self.data[start..start + self.item_size])
     }
 }
 

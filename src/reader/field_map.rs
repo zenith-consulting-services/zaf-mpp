@@ -52,8 +52,14 @@ enum FieldLoc {
 /// field ID MPXJ has used since the original MPX format.
 pub struct FieldMap {
     /// Sorted by legacy ID, one entry per ID (the later of any repeat,
-    /// matching MPXJ's map insert).
+    /// matching MPXJ's map insert). Only IDs the reader asked for are
+    /// kept: the on-disk map describes every field MS Project knows
+    /// (around a thousand for tasks), the reader looks up a few dozen.
     entries: Vec<(i32, FieldLoc)>,
+    /// The IDs requested at construction (sorted), checked in debug
+    /// builds so a lookup outside the list cannot silently fall back to
+    /// its default. Empty disables the check.
+    wanted: Vec<i32>,
 }
 
 impl FieldMap {
@@ -61,22 +67,25 @@ impl FieldMap {
     /// for some field classes, a secondary fallback key); fall back to an
     /// empty map, under which every lookup returns its caller-supplied
     /// default, if neither is present.
-    pub fn from_props(props: &Props, keys: &[i32]) -> FieldMap {
-        for &key in keys {
-            if let Some(data) = props.byte_array(key) {
-                return FieldMap {
-                    entries: Self::parse(data),
-                };
-            }
-        }
-        FieldMap {
-            entries: Vec::new(),
-        }
+    ///
+    /// `wanted` lists every legacy ID the caller will look up.
+    pub fn from_props(props: &Props, keys: &[i32], wanted: &[i32]) -> FieldMap {
+        let mut wanted = wanted.to_vec();
+        wanted.sort_unstable();
+        wanted.dedup();
+        let entries = keys
+            .iter()
+            .find_map(|&key| props.byte_array(key))
+            .map(|data| Self::parse(data, &wanted))
+            .unwrap_or_default();
+        FieldMap { entries, wanted }
     }
 
-    /// Ported from `FieldMap.createFieldMap`.
-    fn parse(data: &[u8]) -> Vec<(i32, FieldLoc)> {
-        let mut entries = Vec::with_capacity(data.len() / 28);
+    /// Ported from `FieldMap.createFieldMap`, keeping only the entries
+    /// whose legacy ID is in `wanted` (sorted). Every entry is still
+    /// decoded, since `block_index` depends on the ones before it.
+    fn parse(data: &[u8], wanted: &[i32]) -> Vec<(i32, FieldLoc)> {
+        let mut entries = Vec::with_capacity(wanted.len());
         let mut last_offset: i32 = 0;
         let mut block_index: usize = 0;
 
@@ -115,7 +124,9 @@ impl FieldMap {
             };
 
             if let Some(loc) = loc {
-                entries.push((legacy_id, loc));
+                if wanted.binary_search(&legacy_id).is_ok() {
+                    entries.push((legacy_id, loc));
+                }
             }
         }
 
@@ -124,6 +135,10 @@ impl FieldMap {
     }
 
     fn get(&self, legacy_id: i32) -> Option<&FieldLoc> {
+        debug_assert!(
+            self.wanted.is_empty() || self.wanted.binary_search(&legacy_id).is_ok(),
+            "field map lookup for legacy id {legacy_id}, which was not requested"
+        );
         self.entries
             .binary_search_by_key(&legacy_id, |e| e.0)
             .ok()
@@ -184,6 +199,7 @@ mod tests {
     fn empty_map_falls_back_to_defaults() {
         let map = FieldMap {
             entries: Vec::new(),
+            wanted: Vec::new(),
         };
         assert_eq!(map.fixed(14, 0, 65535), (0, 65535));
         assert_eq!(map.var(14, 999), 999);
@@ -206,7 +222,7 @@ mod tests {
     #[test]
     fn from_props_falls_back_to_empty_when_no_key_present() {
         let props = build_props(999, &[1, 2, 3]);
-        let map = FieldMap::from_props(&props, &[TASK_FIELD_MAP, TASK_FIELD_MAP2]);
+        let map = FieldMap::from_props(&props, &[TASK_FIELD_MAP, TASK_FIELD_MAP2], &[0]);
         assert_eq!(map.fixed(0, 1, 2), (1, 2));
     }
 
@@ -215,7 +231,7 @@ mod tests {
         // WORK (legacy id 0): fixed, block 0, offset 8.
         let blob = entry(0, 8, 0, 0x65);
         let props = build_props(TASK_FIELD_MAP, &blob);
-        let map = FieldMap::from_props(&props, &[TASK_FIELD_MAP, TASK_FIELD_MAP2]);
+        let map = FieldMap::from_props(&props, &[TASK_FIELD_MAP, TASK_FIELD_MAP2], &[0]);
         assert_eq!(map.fixed(0, 99, 99), (0, 8));
     }
 
@@ -223,7 +239,7 @@ mod tests {
     fn from_props_falls_through_to_secondary_key() {
         let blob = entry(0, 8, 0, 0x65);
         let props = build_props(TASK_FIELD_MAP2, &blob);
-        let map = FieldMap::from_props(&props, &[TASK_FIELD_MAP, TASK_FIELD_MAP2]);
+        let map = FieldMap::from_props(&props, &[TASK_FIELD_MAP, TASK_FIELD_MAP2], &[0]);
         assert_eq!(map.fixed(0, 99, 99), (0, 8));
     }
 
@@ -233,8 +249,11 @@ mod tests {
         // masks to legacy id 0: MPXJ itself can't locate such a field, so
         // it's simply dropped rather than recorded.
         let data = entry(0, -1, 0, 0);
-        let entries = FieldMap::parse(&data);
-        let map = FieldMap { entries };
+        let entries = FieldMap::parse(&data, &[0, 14, 100, 101]);
+        let map = FieldMap {
+            entries,
+            wanted: Vec::new(),
+        };
         assert_eq!(map.fixed(0, 1, 2), (1, 2));
         assert_eq!(map.var(0, 42), 42);
     }
@@ -247,10 +266,32 @@ mod tests {
         // NAME (legacy id 14): var data, key 14.
         data.extend_from_slice(&entry(0, -1, 14, 0x08));
 
-        let entries = FieldMap::parse(&data);
-        let map = FieldMap { entries };
+        let entries = FieldMap::parse(&data, &[0, 14, 100, 101]);
+        let map = FieldMap {
+            entries,
+            wanted: Vec::new(),
+        };
         assert_eq!(map.fixed(0, 99, 99), (0, 8));
         assert_eq!(map.var(14, 0), 14);
+    }
+
+    #[test]
+    fn unwanted_entries_are_dropped_but_still_advance_the_block_index() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&entry(0, 50, 100, 0));
+        // Not wanted, but its lower offset starts the second block.
+        data.extend_from_slice(&entry(0, 10, 101, 0));
+        data.extend_from_slice(&entry(0, 20, 102, 0));
+
+        let entries = FieldMap::parse(&data, &[100, 102]);
+        assert_eq!(entries.len(), 2);
+        let map = FieldMap {
+            entries,
+            wanted: Vec::new(),
+        };
+        assert_eq!(map.fixed(100, 0, 0), (0, 50));
+        assert_eq!(map.fixed(101, 7, 7), (7, 7));
+        assert_eq!(map.fixed(102, 0, 0), (1, 20));
     }
 
     #[test]
@@ -260,8 +301,11 @@ mod tests {
         // Offset drops back down: this belongs to a second fixed block.
         data.extend_from_slice(&entry(0, 10, 101, 0));
 
-        let entries = FieldMap::parse(&data);
-        let map = FieldMap { entries };
+        let entries = FieldMap::parse(&data, &[0, 14, 100, 101]);
+        let map = FieldMap {
+            entries,
+            wanted: Vec::new(),
+        };
         assert_eq!(map.fixed(100, 0, 0), (0, 50));
         assert_eq!(map.fixed(101, 0, 0), (1, 10));
     }

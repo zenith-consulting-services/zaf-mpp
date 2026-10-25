@@ -23,7 +23,7 @@
 //! and custom fields, hyperlinks, recurring tasks, subprojects, and outline
 //! codes are intentionally not ported (out of scope, see README).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use super::field_map::{
     FieldMap, ASSIGNMENT_FIELD_MAP, ASSIGNMENT_FIELD_MAP2, RESOURCE_FIELD_MAP, RESOURCE_FIELD_MAP2,
@@ -93,7 +93,7 @@ pub fn read(
 
     let properties = read_properties(&project_props, application_version);
 
-    let mut resource_calendar_map: HashMap<i32, i32> = HashMap::new();
+    let mut resource_calendar_map: BTreeMap<i32, i32> = BTreeMap::new();
     let calendars = read_calendars(container, &project_props, &mut resource_calendar_map)?;
 
     let app_version = application_version.unwrap_or(14);
@@ -163,7 +163,7 @@ fn read_properties(props: &Props, application_version: Option<u32>) -> ProjectPr
 fn read_calendars(
     container: &mut SliceContainer<'_>,
     project_props: &Props,
-    resource_calendar_map: &mut HashMap<i32, i32>,
+    resource_calendar_map: &mut BTreeMap<i32, i32>,
 ) -> MppResult<Vec<Calendar>> {
     let dir = format!("{PROJECT_DIR}/TBkndCal");
     if !container.storage_exists(&dir) {
@@ -187,7 +187,7 @@ fn read_calendars(
     let default_calendar_days = default_calendar_data.map(parse_calendar_day_hours);
 
     let mut calendars: Vec<Calendar> = Vec::new();
-    let mut seen: HashMap<i32, usize> = HashMap::new();
+    let mut seen: BTreeMap<i32, usize> = BTreeMap::new();
     let mut base_links: Vec<(usize, i32)> = Vec::new();
 
     let items = fixed_data.item_count();
@@ -456,6 +456,59 @@ mod task_field {
         (577, 578, 582),
         (588, 589, 593),
     ];
+
+    /// Every legacy ID `read_tasks` looks up in the field map.
+    pub fn wanted() -> Vec<i32> {
+        let mut ids = vec![
+            UNIQUE_ID,
+            ID,
+            PARENT_TASK_UNIQUE_ID,
+            OUTLINE_LEVEL,
+            SCHEDULED_DURATION,
+            ACTUAL_DURATION_UNITS,
+            ACTUAL_DURATION,
+            CONSTRAINT_TYPE,
+            CONSTRAINT_DATE,
+            SCHEDULED_START,
+            SCHEDULED_FINISH,
+            ACTUAL_START,
+            ACTUAL_FINISH,
+            PERCENT_COMPLETE,
+            CALENDAR_UNIQUE_ID,
+            WORK,
+            ACTUAL_WORK,
+            COST,
+            ACTUAL_COST,
+            EARLY_FINISH,
+            LATE_START,
+            EARLY_START,
+            LATE_FINISH,
+            FREE_SLACK,
+            START_SLACK,
+            FINISH_SLACK,
+            START,
+            FINISH,
+            MANUAL_DURATION,
+            NAME,
+            WBS,
+            NOTES,
+            BASELINE_START,
+            BASELINE_FINISH,
+            BASELINE_DURATION,
+            BASELINE_WORK,
+            BASELINE_COST,
+            BASELINE_ESTIMATED_START,
+            BASELINE_ESTIMATED_FINISH,
+            BASELINE_ESTIMATED_DURATION,
+        ];
+        for (s, f, d, w, c) in BASELINE_N {
+            ids.extend([s, f, d, w, c]);
+        }
+        for (s, f, d) in BASELINE_N_ESTIMATED {
+            ids.extend([s, f, d]);
+        }
+        ids
+    }
 }
 
 /// Pick block 0 (`data`) or block 1 (`data2`) as resolved by the field map.
@@ -509,7 +562,11 @@ fn read_tasks(
         return Ok(Vec::new());
     }
 
-    let field_map = FieldMap::from_props(project_props, &[TASK_FIELD_MAP, TASK_FIELD_MAP2]);
+    let field_map = FieldMap::from_props(
+        project_props,
+        &[TASK_FIELD_MAP, TASK_FIELD_MAP2],
+        &task_field::wanted(),
+    );
     let (uid_block, uid_off) = field_map.fixed(task_field::UNIQUE_ID, 0, 0);
     let (id_block, id_off) = field_map.fixed(task_field::ID, 0, 4);
     let (parent_block, parent_off) = field_map.fixed(task_field::PARENT_TASK_UNIQUE_ID, 0, 36);
@@ -966,14 +1023,14 @@ fn work_hours(raw: f64) -> Option<MppDuration> {
 /// summary-flag portion of `MPPReader.read` (outline number generation and
 /// external-task handling are out of scope).
 fn link_hierarchy(tasks: &mut [Task]) {
-    let mut has_children: HashMap<i32, bool> = HashMap::new();
-    for task in tasks.iter() {
-        if let Some(parent) = task.parent_task_unique_id {
-            has_children.insert(parent, true);
-        }
-    }
+    let mut parents: Vec<i32> = tasks
+        .iter()
+        .filter_map(|t| t.parent_task_unique_id)
+        .collect();
+    parents.sort_unstable();
+    parents.dedup();
     for task in tasks.iter_mut() {
-        task.summary = has_children.get(&task.unique_id).copied().unwrap_or(false);
+        task.summary = parents.binary_search(&task.unique_id).is_ok();
     }
     tasks.sort_by_key(|t| t.id);
 }
@@ -987,23 +1044,48 @@ fn link_hierarchy(tasks: &mut [Task]) {
 /// `link_hierarchy` above leaves them) since child counters are position
 /// counts, not a function of the tree shape alone.
 fn generate_auto_wbs(tasks: &mut [Task]) {
-    let mut child_counts: HashMap<i32, i32> = HashMap::new();
-    let mut resolved: HashMap<i32, String> = HashMap::new();
+    // Child counters keyed by parent unique ID, with -1 for top-level
+    // tasks (so a parent ID of -1 shares the top-level counter, as it
+    // did when this was a map keyed the same way).
+    const TOP_LEVEL: i32 = -1;
+    let mut counter_keys: Vec<i32> = tasks
+        .iter()
+        .map(|t| t.parent_task_unique_id.unwrap_or(TOP_LEVEL))
+        .collect();
+    counter_keys.sort_unstable();
+    counter_keys.dedup();
+    let mut counts = vec![0i32; counter_keys.len()];
 
-    for task in tasks.iter_mut() {
+    // Position of each task by unique ID; a parent's WBS is only visible
+    // once that parent has been processed (it appears earlier by ID).
+    let mut positions: Vec<(i32, usize)> = tasks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.unique_id, i))
+        .collect();
+    crate::util::sort_dedup_keep_last(&mut positions, |e| e.0);
+
+    for i in 0..tasks.len() {
+        let task = &tasks[i];
         let auto_wbs = if task.unique_id == 0 {
             "0".to_string()
         } else {
+            let key = task.parent_task_unique_id.unwrap_or(TOP_LEVEL);
+            let slot = counter_keys
+                .binary_search(&key)
+                .expect("every key collected");
+            counts[slot] += 1;
+            let count = counts[slot];
             match task.parent_task_unique_id {
-                None => {
-                    let count = child_counts.entry(-1).or_insert(0);
-                    *count += 1;
-                    count.to_string()
-                }
+                None => count.to_string(),
                 Some(parent_uid) => {
-                    let parent_wbs = resolved.get(&parent_uid).cloned().unwrap_or_default();
-                    let count = child_counts.entry(parent_uid).or_insert(0);
-                    *count += 1;
+                    let parent_wbs = positions
+                        .binary_search_by_key(&parent_uid, |e| e.0)
+                        .ok()
+                        .map(|j| positions[j].1)
+                        .filter(|&p| p < i)
+                        .and_then(|p| tasks[p].wbs.as_deref())
+                        .unwrap_or("");
                     if parent_wbs == "0" {
                         count.to_string()
                     } else {
@@ -1012,12 +1094,10 @@ fn generate_auto_wbs(tasks: &mut [Task]) {
                 }
             }
         };
-
-        let final_wbs = task.wbs.clone().unwrap_or(auto_wbs);
+        let task = &mut tasks[i];
         if task.wbs.is_none() {
-            task.wbs = Some(final_wbs.clone());
+            task.wbs = Some(auto_wbs);
         }
-        resolved.insert(task.unique_id, final_wbs);
     }
 }
 
@@ -1128,20 +1208,39 @@ mod resource_field {
     pub const OVERTIME_RATE: i32 = 7;
     pub const COST: i32 = 12;
     pub const WORK: i32 = 13;
+
+    /// Every legacy ID `read_resources` looks up in the field map.
+    pub const WANTED: [i32; 11] = [
+        UNIQUE_ID,
+        ID,
+        NAME,
+        INITIALS,
+        GROUP,
+        EMAIL_ADDRESS,
+        MAX_UNITS,
+        STANDARD_RATE,
+        OVERTIME_RATE,
+        COST,
+        WORK,
+    ];
 }
 
 fn read_resources(
     container: &mut SliceContainer<'_>,
     project_props: &Props,
     application_version: u32,
-    resource_calendar_map: &HashMap<i32, i32>,
+    resource_calendar_map: &BTreeMap<i32, i32>,
 ) -> MppResult<Vec<Resource>> {
     let dir = format!("{PROJECT_DIR}/TBkndRsc");
     if !container.storage_exists(&dir) {
         return Ok(Vec::new());
     }
 
-    let field_map = FieldMap::from_props(project_props, &[RESOURCE_FIELD_MAP, RESOURCE_FIELD_MAP2]);
+    let field_map = FieldMap::from_props(
+        project_props,
+        &[RESOURCE_FIELD_MAP, RESOURCE_FIELD_MAP2],
+        &resource_field::WANTED,
+    );
     let (uid_block, uid_off) = field_map.fixed(resource_field::UNIQUE_ID, 0, 0);
     let (id_block, id_off) = field_map.fixed(resource_field::ID, 0, 4);
     let (max_units_block, max_units_off) = field_map.fixed(resource_field::MAX_UNITS, 0, 44);
@@ -1261,6 +1360,20 @@ mod assignment_field {
     pub const ACTUAL_WORK: i32 = 10;
     pub const COST: i32 = 26;
     pub const ACTUAL_COST: i32 = 28;
+
+    /// Every legacy ID `read_assignments` looks up in the field map.
+    pub const WANTED: [i32; 10] = [
+        UNIQUE_ID,
+        TASK_UNIQUE_ID,
+        RESOURCE_UNIQUE_ID,
+        START,
+        FINISH,
+        ASSIGNMENT_UNITS,
+        WORK,
+        ACTUAL_WORK,
+        COST,
+        ACTUAL_COST,
+    ];
 }
 
 fn read_assignments(
@@ -1278,6 +1391,7 @@ fn read_assignments(
     let field_map = FieldMap::from_props(
         project_props,
         &[ASSIGNMENT_FIELD_MAP, ASSIGNMENT_FIELD_MAP2],
+        &assignment_field::WANTED,
     );
     let (_, uid_off) = field_map.fixed(assignment_field::UNIQUE_ID, 0, 0);
     let (_, task_uid_off) = field_map.fixed(assignment_field::TASK_UNIQUE_ID, 0, 4);

@@ -34,7 +34,7 @@ use crate::container::fixed_meta::FixedMeta;
 use crate::container::props::Props;
 use crate::container::var2_data::Var2Data;
 use crate::container::var_meta::VarMeta;
-use crate::container::OleContainer;
+use crate::container::SliceContainer;
 use crate::error::{MppError, MppResult};
 use crate::model::{
     Assignment, Baseline, Calendar, CalendarException, ConstraintType, DayHours, Project,
@@ -47,8 +47,6 @@ use crate::util::{
 };
 
 const PROJECT_DIR: &str = "/   114";
-
-type Ole<'a> = OleContainer<std::io::Cursor<&'a [u8]>>;
 
 // PropsKey values, from src/main/java/org/mpxj/mpp/PropsKey.java.
 mod props_key {
@@ -74,9 +72,12 @@ mod props_key {
     pub const CRITICAL_SLACK_LIMIT: i32 = 37748756;
 }
 
-pub fn read(container: &mut Ole<'_>, application_version: Option<u32>) -> MppResult<Project> {
-    let root_props_bytes = container.read_stream("/Props14")?;
-    let root_props = Props::from_vec(root_props_bytes);
+pub fn read(
+    container: &mut SliceContainer<'_>,
+    application_version: Option<u32>,
+) -> MppResult<Project> {
+    let root_props_bytes = container.stream("/Props14")?;
+    let root_props = Props::from_vec(root_props_bytes.into_owned());
 
     let password_flag = root_props.byte(props_key::PASSWORD_FLAG);
     let password_required_to_read = password_flag & 0x1 != 0;
@@ -87,8 +88,8 @@ pub fn read(container: &mut Ole<'_>, application_version: Option<u32>) -> MppRes
         return Err(MppError::PasswordProtected);
     }
 
-    let project_props_bytes = container.read_stream(&format!("{PROJECT_DIR}/Props"))?;
-    let project_props = Props::from_vec(project_props_bytes);
+    let project_props_bytes = container.stream(&format!("{PROJECT_DIR}/Props"))?;
+    let project_props = Props::from_vec(project_props_bytes.into_owned());
 
     let properties = read_properties(&project_props, application_version);
 
@@ -160,7 +161,7 @@ fn read_properties(props: &Props, application_version: Option<u32>) -> ProjectPr
 // ---------------------------------------------------------------------
 
 fn read_calendars(
-    container: &mut Ole<'_>,
+    container: &mut SliceContainer<'_>,
     project_props: &Props,
     resource_calendar_map: &mut HashMap<i32, i32>,
 ) -> MppResult<Vec<Calendar>> {
@@ -169,14 +170,14 @@ fn read_calendars(
         return Ok(Vec::new());
     }
 
-    let var_meta_bytes = container.read_stream(&format!("{dir}/VarMeta"))?;
+    let var_meta_bytes = container.stream(&format!("{dir}/VarMeta"))?;
     let var_meta = VarMeta::parse(&var_meta_bytes)?;
-    let var_data_bytes = container.read_stream(&format!("{dir}/Var2Data"))?;
+    let var_data_bytes = container.stream(&format!("{dir}/Var2Data"))?;
     let var_data = Var2Data::parse(&var_meta, &var_data_bytes);
 
-    let fixed_meta_bytes = container.read_stream(&format!("{dir}/FixedMeta"))?;
+    let fixed_meta_bytes = container.stream(&format!("{dir}/FixedMeta"))?;
     let fixed_meta = FixedMeta::parse(&fixed_meta_bytes, 10)?;
-    let fixed_data_bytes = container.read_stream(&format!("{dir}/FixedData"))?;
+    let fixed_data_bytes = container.stream(&format!("{dir}/FixedData"))?;
     let fixed_data = FixedData::parse_with_meta(&fixed_meta, &fixed_data_bytes, 12);
 
     const CALENDAR_NAME_TYPE: i32 = 1;
@@ -498,7 +499,7 @@ fn task_bit_flags(application_version: u32) -> TaskBitFlags {
 }
 
 fn read_tasks(
-    container: &mut Ole<'_>,
+    container: &mut SliceContainer<'_>,
     project_props: &Props,
     application_version: u32,
     critical_slack_limit_days: i32,
@@ -585,25 +586,25 @@ fn read_tasks(
         )
     });
 
-    let var_meta_bytes = container.read_stream(&format!("{dir}/VarMeta"))?;
+    let var_meta_bytes = container.stream(&format!("{dir}/VarMeta"))?;
     let var_meta = VarMeta::parse(&var_meta_bytes)?;
-    let var_data_bytes = container.read_stream(&format!("{dir}/Var2Data"))?;
+    let var_data_bytes = container.stream(&format!("{dir}/Var2Data"))?;
     let var_data = Var2Data::parse(&var_meta, &var_data_bytes);
 
-    let fixed_meta_bytes = container.read_stream(&format!("{dir}/FixedMeta"))?;
+    let fixed_meta_bytes = container.stream(&format!("{dir}/FixedMeta"))?;
     let fixed_meta = FixedMeta::parse(&fixed_meta_bytes, 47)?;
-    let fixed_data_bytes = container.read_stream(&format!("{dir}/FixedData"))?;
+    let fixed_data_bytes = container.stream(&format!("{dir}/FixedData"))?;
     // No cap on record size: the real per-file layout, not a hardcoded
     // default, determines how large a task record is (see `field_map`).
     let fixed_data = FixedData::parse_with_meta(&fixed_meta, &fixed_data_bytes, 0);
 
-    let fixed2_meta_bytes = container.read_stream(&format!("{dir}/Fixed2Meta"))?;
+    let fixed2_meta_bytes = container.stream(&format!("{dir}/Fixed2Meta"))?;
     let fixed2_meta = FixedMeta::parse_with_candidates(
         &fixed2_meta_bytes,
         fixed_data.item_count(),
         &[92, 93, 94, 95, 96],
     )?;
-    let fixed2_data_bytes = container.read_stream(&format!("{dir}/Fixed2Data"))?;
+    let fixed2_data_bytes = container.stream(&format!("{dir}/Fixed2Data"))?;
     let fixed2_data = FixedData::parse_with_meta(&fixed2_meta, &fixed2_data_bytes, 0);
 
     let bit_flags = task_bit_flags(application_version);
@@ -1025,7 +1026,7 @@ fn generate_auto_wbs(tasks: &mut [Task]) {
 // ---------------------------------------------------------------------
 
 fn read_relations(
-    container: &mut Ole<'_>,
+    container: &mut SliceContainer<'_>,
     tasks: &mut [Task],
     application_version: u32,
 ) -> MppResult<()> {
@@ -1034,9 +1035,9 @@ fn read_relations(
         return Ok(());
     }
 
-    let fixed_meta_bytes = container.read_stream(&format!("{dir}/FixedMeta"))?;
+    let fixed_meta_bytes = container.stream(&format!("{dir}/FixedMeta"))?;
     let fixed_meta = FixedMeta::parse(&fixed_meta_bytes, 10)?;
-    let fixed_data_bytes = container.read_stream(&format!("{dir}/FixedData"))?;
+    let fixed_data_bytes = container.stream(&format!("{dir}/FixedData"))?;
     let fixed_data = FixedData::parse_fixed_size(&fixed_data_bytes, 20);
 
     // `read_tasks` returns tasks in strictly ascending unique ID order
@@ -1130,7 +1131,7 @@ mod resource_field {
 }
 
 fn read_resources(
-    container: &mut Ole<'_>,
+    container: &mut SliceContainer<'_>,
     project_props: &Props,
     application_version: u32,
     resource_calendar_map: &HashMap<i32, i32>,
@@ -1153,14 +1154,14 @@ fn read_resources(
     let group_key = field_map.var(resource_field::GROUP, resource_field::GROUP);
     let email_key = field_map.var(resource_field::EMAIL_ADDRESS, resource_field::EMAIL_ADDRESS);
 
-    let var_meta_bytes = container.read_stream(&format!("{dir}/VarMeta"))?;
+    let var_meta_bytes = container.stream(&format!("{dir}/VarMeta"))?;
     let var_meta = VarMeta::parse(&var_meta_bytes)?;
-    let var_data_bytes = container.read_stream(&format!("{dir}/Var2Data"))?;
+    let var_data_bytes = container.stream(&format!("{dir}/Var2Data"))?;
     let var_data = Var2Data::parse(&var_meta, &var_data_bytes);
 
-    let fixed_meta_bytes = container.read_stream(&format!("{dir}/FixedMeta"))?;
+    let fixed_meta_bytes = container.stream(&format!("{dir}/FixedMeta"))?;
     let fixed_meta = FixedMeta::parse(&fixed_meta_bytes, 37)?;
-    let fixed_data_bytes = container.read_stream(&format!("{dir}/FixedData"))?;
+    let fixed_data_bytes = container.stream(&format!("{dir}/FixedData"))?;
     // No cap: see the equivalent note in `read_tasks`.
     let fixed_data = FixedData::parse_with_meta(&fixed_meta, &fixed_data_bytes, 0);
 
@@ -1262,7 +1263,10 @@ mod assignment_field {
     pub const ACTUAL_COST: i32 = 28;
 }
 
-fn read_assignments(container: &mut Ole<'_>, project_props: &Props) -> MppResult<Vec<Assignment>> {
+fn read_assignments(
+    container: &mut SliceContainer<'_>,
+    project_props: &Props,
+) -> MppResult<Vec<Assignment>> {
     let dir = format!("{PROJECT_DIR}/TBkndAssn");
     if !container.storage_exists(&dir) {
         return Ok(Vec::new());
@@ -1286,7 +1290,7 @@ fn read_assignments(container: &mut Ole<'_>, project_props: &Props) -> MppResult
     let (_, cost_off) = field_map.fixed(assignment_field::COST, 0, 86);
     let (_, actual_cost_off) = field_map.fixed(assignment_field::ACTUAL_COST, 0, 94);
 
-    let fixed_data_bytes = container.read_stream(&format!("{dir}/FixedData"))?;
+    let fixed_data_bytes = container.stream(&format!("{dir}/FixedData"))?;
     let fixed_data = FixedData::parse_fixed_size(&fixed_data_bytes, 110);
 
     let mut assignments = Vec::new();

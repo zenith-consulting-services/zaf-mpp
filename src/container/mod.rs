@@ -10,12 +10,14 @@
 //! porting MPXJ's stream `reset`/skip bookkeeping.
 
 pub mod comp_obj;
+mod direct;
 pub mod fixed_data;
 pub mod fixed_meta;
 pub mod props;
 pub mod var2_data;
 pub mod var_meta;
 
+use std::borrow::Cow;
 use std::io::{Cursor, Read, Seek};
 
 use crate::error::{MppError, MppResult};
@@ -82,8 +84,91 @@ impl<F: Read + Seek> OleContainer<F> {
     }
 }
 
+/// An OLE2 compound document read from borrowed bytes: opened and
+/// validated by `cfb`, with stream contents served zero-copy by
+/// [`direct::DirectReader`] where it can, and by `cfb` otherwise.
+pub(crate) struct SliceContainer<'a> {
+    ole: OleContainer<Cursor<&'a [u8]>>,
+    direct: Option<direct::DirectReader<'a>>,
+}
+
+impl<'a> SliceContainer<'a> {
+    pub(crate) fn open(bytes: &'a [u8]) -> MppResult<Self> {
+        let ole = OleContainer::open_slice(bytes)?;
+        Ok(SliceContainer {
+            ole,
+            direct: direct::DirectReader::new(bytes),
+        })
+    }
+
+    /// Stream contents, borrowed from the input where possible. Same
+    /// bytes and same errors as [`OleContainer::read_stream`].
+    pub(crate) fn stream(&mut self, path: &str) -> MppResult<Cow<'a, [u8]>> {
+        if let Some(bytes) = self.direct.as_ref().and_then(|d| d.stream(path)) {
+            return Ok(bytes);
+        }
+        self.ole.read_stream(path).map(Cow::Owned)
+    }
+
+    pub(crate) fn storage_exists(&self, path: &str) -> bool {
+        self.ole.storage_exists(path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// Every stream in every corpus compound file reads back identically
+    /// through the direct reader and through `cfb`.
+    #[test]
+    fn direct_reader_matches_cfb_for_every_corpus_stream() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/mpxj/junit/data");
+        if !root.exists() {
+            eprintln!("skipping: corpus not fetched");
+            return;
+        }
+        let mut stack = vec![root];
+        let (mut files, mut streams, mut direct_hits) = (0, 0, 0);
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let bytes = std::fs::read(&path).unwrap();
+                let Ok(mut ole) = OleContainer::open_slice(&bytes) else {
+                    continue;
+                };
+                files += 1;
+                let direct = direct::DirectReader::new(&bytes)
+                    .unwrap_or_else(|| panic!("{}: direct reader declined", path.display()));
+                let stream_paths: Vec<String> = ole
+                    .file
+                    .walk()
+                    .filter(|e| e.is_stream())
+                    .map(|e| e.path().to_string_lossy().into_owned())
+                    .collect();
+                for stream_path in stream_paths {
+                    streams += 1;
+                    let expected = ole.read_stream(&stream_path).unwrap();
+                    if let Some(actual) = direct.stream(&stream_path) {
+                        direct_hits += 1;
+                        assert_eq!(
+                            actual.as_ref(),
+                            expected.as_slice(),
+                            "{} {stream_path}",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+        eprintln!("{files} files, {streams} streams, {direct_hits} served directly");
+        assert_eq!(streams, direct_hits, "some streams fell back to cfb");
+    }
+
     use super::*;
     use std::io::Write;
 

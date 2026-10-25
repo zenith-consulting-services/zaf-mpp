@@ -12,14 +12,14 @@ mod mpp14;
 pub(crate) mod p6;
 
 use crate::container::comp_obj::CompObj;
-use crate::container::OleContainer;
+use crate::container::SliceContainer;
 use crate::error::{MppError, MppResult};
 use crate::model::Project;
 
 pub fn read_mpp_bytes(bytes: &[u8]) -> MppResult<Project> {
-    let mut container = OleContainer::open_slice(bytes)?;
+    let mut container = SliceContainer::open(bytes)?;
 
-    let compobj_bytes = container.read_stream("/\u{1}CompObj")?;
+    let compobj_bytes = container.stream("/\u{1}CompObj")?;
     let compobj = CompObj::parse(&compobj_bytes)?;
     let format = compobj.file_format.clone().unwrap_or_default();
 

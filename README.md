@@ -62,6 +62,19 @@ Add it as a git dependency:
 zaf-mpp = { git = "https://github.com/zenith-consulting-services/zaf-mpp" }
 ```
 
+## Testing and benchmarks
+
+```sh
+scripts/fetch-test-data.sh   # MPXJ test corpus into tests/data/mpxj (gitignored)
+cargo test                   # corpus tests skip cleanly without it
+cargo bench --bench read     # warm parse time per input file (divan)
+```
+
+`tests/corpus_snapshot.rs` serialises the full parsed output for every
+corpus file and compares it with `tests/snapshots/corpus_digests.txt`, so
+a change that alters parsed output for any file fails. Set
+`ZAF_MPP_SNAPSHOT_UPDATE=1` to regenerate it after an intentional change.
+
 ## Licence
 
 zaf-mpp is a derivative work of MPXJ. All knowledge of the MPP14 binary
